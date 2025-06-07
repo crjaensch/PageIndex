@@ -17,7 +17,7 @@ import yaml
 from pathlib import Path
 from types import SimpleNamespace as config
 
-CHATGPT_API_KEY = os.getenv("CHATGPT_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 
 def count_tokens(text, model):
@@ -25,12 +25,12 @@ def count_tokens(text, model):
         # First try to get the encoding for the specified model
         enc = tiktoken.encoding_for_model(model)
     except KeyError:
-        # If model not found, use a default encoding (cl100k_base is used by gpt-4 and gpt-3.5-turbo)
+        # If model not found, use a default encoding (cl100k_base is used by gpt-4, gpt-4o, gpt-4o-mini)
         enc = tiktoken.get_encoding("cl100k_base")
     tokens = enc.encode(text)
     return len(tokens)
 
-def ChatGPT_API_with_finish_reason(model, prompt, api_key=CHATGPT_API_KEY, chat_history=None):
+def ChatGPT_API_with_finish_reason(model, prompt, api_key=OPENAI_API_KEY, chat_history=None):
     max_retries = 10
     client = openai.OpenAI(api_key=api_key)
     for i in range(max_retries):
@@ -62,7 +62,7 @@ def ChatGPT_API_with_finish_reason(model, prompt, api_key=CHATGPT_API_KEY, chat_
 
 
 
-def ChatGPT_API(model, prompt, api_key=CHATGPT_API_KEY, chat_history=None):
+def ChatGPT_API(model, prompt, api_key=OPENAI_API_KEY, chat_history=None):
     max_retries = 10
     client = openai.OpenAI(api_key=api_key)
     for i in range(max_retries):
@@ -90,7 +90,7 @@ def ChatGPT_API(model, prompt, api_key=CHATGPT_API_KEY, chat_history=None):
                 return "Error"
             
 
-async def ChatGPT_API_async(model, prompt, api_key=CHATGPT_API_KEY):
+async def ChatGPT_API_async(model, prompt, api_key=OPENAI_API_KEY):
     max_retries = 10
     client = openai.AsyncOpenAI(api_key=api_key)
     for i in range(max_retries):
@@ -413,15 +413,14 @@ def add_preface_if_needed(data):
 
 
 
-def get_page_tokens(pdf_path, model="gpt-4o-2024-11-20", pdf_parser="PyPDF2"):
-    enc = tiktoken.encoding_for_model(model)
+def get_page_tokens(pdf_path, model="gpt-4.1", pdf_parser="PyPDF2"):
     if pdf_parser == "PyPDF2":
         pdf_reader = PyPDF2.PdfReader(pdf_path)
         page_list = []
         for page_num in range(len(pdf_reader.pages)):
             page = pdf_reader.pages[page_num]
             page_text = page.extract_text()
-            token_length = len(enc.encode(page_text))
+            token_length = count_tokens(page_text, model)
             page_list.append((page_text, token_length))
         return page_list
     elif pdf_parser == "PyMuPDF":
@@ -433,7 +432,7 @@ def get_page_tokens(pdf_path, model="gpt-4o-2024-11-20", pdf_parser="PyPDF2"):
         page_list = []
         for page in doc:
             page_text = page.get_text()
-            token_length = len(enc.encode(page_text))
+            token_length = count_tokens(page_text, model)
             page_list.append((page_text, token_length))
         return page_list
     else:
