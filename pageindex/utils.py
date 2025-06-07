@@ -1,5 +1,5 @@
 import tiktoken
-import openai
+from agents import Agent, Runner, set_default_openai_api
 import logging
 import os
 from datetime import datetime
@@ -18,6 +18,10 @@ from pathlib import Path
 from types import SimpleNamespace as config
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if OPENAI_API_KEY:
+    set_default_openai_api(OPENAI_API_KEY)
+else:
+    logging.warning("OPENAI_API_KEY not found in environment. Agent SDK may not function.")
 
 
 def count_tokens(text, model):
@@ -30,86 +34,37 @@ def count_tokens(text, model):
     tokens = enc.encode(text)
     return len(tokens)
 
-def ChatGPT_API_with_finish_reason(model, prompt, api_key=OPENAI_API_KEY, chat_history=None):
-    max_retries = 10
-    client = openai.OpenAI(api_key=api_key)
-    for i in range(max_retries):
-        try:
-            if chat_history:
-                messages = chat_history
-                messages.append({"role": "user", "content": prompt})
-            else:
-                messages = [{"role": "user", "content": prompt}]
-            
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=0,
-            )
-            if response.choices[0].finish_reason == "length":
-                return response.choices[0].message.content, "max_output_reached"
-            else:
-                return response.choices[0].message.content, "finished"
+async def run_specific_agent(agent: Agent, user_prompt_content: str, model_override: str = None) -> str:
+    """
+    Runs a pre-defined agent with the given user prompt content.
+    The agent should have its base instructions and model defined at instantiation.
+    """
+    # Ensure agent is not None
+    if agent is None:
+        logging.error("Agent cannot be None for run_specific_agent.")
+        return "Error: Agent was None."
 
-        except Exception as e:
-            print('************* Retrying *************')
-            logging.error(f"Error: {e}")
-            if i < max_retries - 1:
-                time.sleep(1)  # Wait for 1秒 before retrying
-            else:
-                logging.error('Max retries reached for prompt: ' + prompt)
-                return "Error"
+    messages_input = [{"role": "user", "content": user_prompt_content}]
+    
+    try:
+        # Note: The 'model_override' parameter is not directly used with Runner.run in the example.
+        # If model needs to be overridden, the Agent instance itself might need to be created
+        # with the new model, or the SDK should provide a way to specify it during the run.
+        # For now, we assume the agent's model is set during its instantiation.
+        if model_override:
+            # This is a placeholder for potential future logic if model override is needed and supported.
+            pass
 
+        result = await Runner.run(agent, input=messages_input)
+        
+        response_text = result.final_output
+        return response_text
+    except Exception as e:
+        agent_name = getattr(agent, 'name', 'Unnamed Agent') # Safely get agent name
+        logging.error(f"Error running agent {agent_name}: {e}")
+        # Return a string indicating error, consistent with previous functions' error returns.
+        return f"Error: Agent execution failed for {agent_name}. Details: {e}"
 
-
-def ChatGPT_API(model, prompt, api_key=OPENAI_API_KEY, chat_history=None):
-    max_retries = 10
-    client = openai.OpenAI(api_key=api_key)
-    for i in range(max_retries):
-        try:
-            if chat_history:
-                messages = chat_history
-                messages.append({"role": "user", "content": prompt})
-            else:
-                messages = [{"role": "user", "content": prompt}]
-            
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=0,
-            )
-   
-            return response.choices[0].message.content
-        except Exception as e:
-            print('************* Retrying *************')
-            logging.error(f"Error: {e}")
-            if i < max_retries - 1:
-                time.sleep(1)  # Wait for 1秒 before retrying
-            else:
-                logging.error('Max retries reached for prompt: ' + prompt)
-                return "Error"
-            
-
-async def ChatGPT_API_async(model, prompt, api_key=OPENAI_API_KEY):
-    max_retries = 10
-    client = openai.AsyncOpenAI(api_key=api_key)
-    for i in range(max_retries):
-        try:
-            messages = [{"role": "user", "content": prompt}]
-            response = await client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=0,
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            print('************* Retrying *************')
-            logging.error(f"Error: {e}")
-            if i < max_retries - 1:
-                await asyncio.sleep(1)  # Wait for 1秒 before retrying
-            else:
-                logging.error('Max retries reached for prompt: ' + prompt)
-                return "Error"  
             
 def get_json_content(response):
     start_idx = response.find("```json")

@@ -1,77 +1,249 @@
 import os
+import math
 import json
 import copy
-import math
 import random
 import re
-from .utils import *
-import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from .utils import run_specific_agent, extract_json, count_tokens, write_node_id, JsonLogger, add_preface_if_needed, get_page_tokens, post_processing, convert_physical_index_to_int, add_node_text, get_pdf_name, convert_page_to_int, structure_to_list
+from agents import Agent
+import asyncio # Ensure asyncio is imported if not already explicitly
+
+# --- Agent Definitions ---
+DEFAULT_AGENT_MODEL = "gpt-4.1-mini" # Or your preferred model, e.g., from config
+
+CHECK_TITLE_APPEARANCE_AGENT = Agent(
+    name="TitleAppearanceCheckerAgent",
+    instructions="Your job is to check if a given section title appears or starts in the given page_text. Use fuzzy matching and ignore space inconsistencies. You must reply in the specified JSON format: {\"thinking\": \"<your reasoning>\", \"answer\": \"yes or no\"}. Directly return the final JSON structure. Do not output anything else.",
+    model=DEFAULT_AGENT_MODEL 
+)
+
+CHECK_TITLE_START_AGENT = Agent(
+    name="TitleStartCheckerAgent",
+    instructions="Your job is to check if the current section starts in the beginning of the given page_text. If there are other contents before the current section title, then it does not start at the beginning. Use fuzzy matching and ignore space inconsistencies. You must reply in the specified JSON format: {\\\"thinking\\\": \\\"<your reasoning>\\\", \\\"start_begin\\\": \\\"yes or no\\\"}. Directly return the final JSON structure. Do not output anything else.",
+    model=DEFAULT_AGENT_MODEL
+)
+
+TOC_DETECTOR_AGENT = Agent(
+    name="TocDetectorAgent",
+    instructions="Your job is to detect if there is a table of content provided in the given text. Note that abstract, summary, notation list, figure list, table list, etc., are not table of contents. You must reply in the specified JSON format: {\\\"thinking\\\": \\\"<why you think there is a ToC>\\\", \\\"toc_detected\\\": \\\"yes or no\\\"}. Directly return the final JSON structure. Do not output anything else.",
+    model=DEFAULT_AGENT_MODEL
+)
+
+TOC_EXTRACTION_COMPLETE_AGENT = Agent(
+    name="TocExtractionCompleteAgent",
+    instructions="Your job is to check if the given table of contents (ToC) is complete based on the provided text. The ToC might be a continuation of a previous extraction. You must reply in the specified JSON format: {\\\"thinking\\\": \\\"<your reasoning>\\\", \\\"complete\\\": \\\"yes or no\\\"}. Directly return the final JSON structure. Do not output anything else.",
+    model=DEFAULT_AGENT_MODEL
+)
+
+EXTRACT_TOC_AGENT = Agent(
+    name="TocExtractorAgent",
+    instructions="Your job is to extract the full table of contents (ToC) from the given text. Replace '...' with ':' if appropriate. Ensure all relevant sections are included. Directly return the full table of contents as a single block of text. Do not output anything else.",
+    model=DEFAULT_AGENT_MODEL
+)
+
+TOC_JSON_TRANSFORMER_AGENT = Agent(
+    name="TocJsonTransformerAgent",
+    instructions="""You are an expert in parsing and structuring table of contents (ToC) data.
+You will be given raw text representing a table of contents.
+Your task is to transform this entire raw ToC text into a specific JSON format.
+The required JSON output structure is:
+{
+  "table_of_contents": [
+    {
+      "structure": "<structure index string, e.g., '1.1.2', or null if not applicable/present>",
+      "title": "<title of the section as a string>",
+      "page": "<page number as an integer, or null if not applicable/present>"
+    }
+    // ... additional items for each entry in the ToC
+  ]
+}
+- The 'structure' field is a string representing the hierarchical index (e.g., "1", "1.1", "A.2.c"). If no structure/numbering is present for an item, use null.
+- The 'title' field is the verbatim title of the section.
+- The 'page' field is the page number associated with the title. If no page number is present for an item, use null.
+Ensure you process the *entire* provided table of contents text and transform it completely in one go.
+Directly return *only* the final JSON object (starting with '{' and ending with '}'). Do not add any explanatory text before or after the JSON.
+""",
+    model=DEFAULT_AGENT_MODEL
+)
+
+CREATE_TOC_FROM_CONTENT_AGENT = Agent(
+    name="CreateTocFromContentAgent",
+    instructions="""You are an expert in analyzing document text and generating a hierarchical table of contents (ToC) from it.
+Given a chunk of document text, which may include <physical_index_X> tags indicating page numbers:
+1. Identify section titles within the text.
+2. Determine their hierarchical structure (e.g., 1, 1.1, 1.2, 2).
+3. Extract their corresponding physical page numbers (from the <physical_index_X> tags nearest to the start of each title).
+4. Return a JSON list of ToC items. Each item in the list must be an object with the following keys:
+    - "structure": (string) The hierarchical structure index (e.g., "1", "1.1").
+    - "title": (string) The extracted section title.
+    - "physical_index": (string) The <physical_index_X> tag (e.g., "<physical_index_123>"). If no specific index tag is clearly associated with a title in the provided text, this can be null, but strive to find it.
+
+Important:
+- Focus only on the provided text chunk.
+- Ensure the output is a valid JSON list of objects.
+- If the text chunk appears to be a continuation of a ToC from a previous chunk, try to make your structural numbering logical in that context if possible, but primarily focus on the content of the current chunk.
+- Directly return *only* the final JSON list. Do not add any explanatory text before or after the JSON.
+""",
+    model=DEFAULT_AGENT_MODEL
+)
+
+SINGLE_TOC_ITEM_FIXER_AGENT = Agent(
+    name="SingleTocItemFixerAgent",
+    instructions="""You are an expert in finding the physical page number for a single table of contents (ToC) item title within a given text snippet.
+Given a "Section Title" and "Partial Document Text" (which includes <physical_index_X> tags):
+1. Locate the first occurrence of the "Section Title" in the "Partial Document Text".
+2. Identify the <physical_index_X> tag that corresponds to the page where this title starts.
+3. Return a JSON object containing only the "physical_index" as a string in the format "<physical_index_X>".
+
+Example Input:
+Section Title: "Chapter 1: Introduction"
+Partial Document Text:
+---
+<physical_index_5>
+Some text...
+Chapter 1: Introduction
+More text...
+<physical_index_5>
+<physical_index_6>
+...
+<physical_index_6>
+---
+
+Example Output:
+{
+    "physical_index": "<physical_index_5>"
+}
+
+If the title is not found, or if no physical_index tag is associated, return:
+{
+    "physical_index": null
+}
+Directly return *only* the final JSON object. Do not add any explanatory text.
+""",
+    model=DEFAULT_AGENT_MODEL  # Or your preferred default model
+)
+
+TOC_TRANSFORMATION_COMPLETE_AGENT = Agent(
+    name="TocTransformationCompleteAgent",
+    instructions="""You are given a raw table of contents (ToC) text and a cleaned/structured ToC (usually in JSON format).
+Your job is to determine if the cleaned ToC accurately and completely represents all the information from the raw ToC.
+Consider if all sections, page numbers (if present in raw), and hierarchical relationships from the raw ToC are present in the cleaned ToC.
+
+Reply in a JSON format:
+{
+    "thinking": "<Explain your reasoning why the cleaned table of contents is complete or not, comparing it to the raw version.>",
+    "completed": "<'yes' or 'no'>"
+}
+Directly return the final JSON structure. Do not output anything else.
+""",
+    model=DEFAULT_AGENT_MODEL
+)
+
+ADD_PAGE_NUMBER_AGENT = Agent(
+    name="AddPageNumberAgent",
+    instructions="""You are an expert in correlating table of contents (ToC) items with their physical page numbers in a document.
+You will be given:
+1. A 'Partial Document Text' which may contain tags like <physical_index_X> (e.g., <physical_index_123>) indicating page numbers.
+2. A 'Given ToC Structure' as a JSON list of objects, where each object has "structure" and "title" keys (and potentially an existing "physical_index" which should be preserved if the item is not found in the current 'Partial Document Text').
+
+Your task is to process each item in the 'Given ToC Structure'. For each item:
+- Determine if its 'title' starts or appears in the 'Partial Document Text'.
+- If it does, find the *first* <physical_index_X> tag that appears at or after the title's occurrence in the text. This tag represents the page number for this occurrence.
+- Construct an output JSON list. Each item in this output list should correspond to an item in the input 'Given ToC Structure'.
+- The output item must have the following keys:
+    - "structure": (string or null) The original structure index from the input.
+    - "title": (string) The original title from the input.
+    - "physical_index": (string or null) The extracted <physical_index_X> tag (e.g., "<physical_index_123>") if found for the title in the current 'Partial Document Text'. If the title is not found, or no <physical_index_X> tag is associated with its occurrence in this specific part, the "physical_index" should retain its original value from the input 'Given ToC Structure' (if one existed) or be null if none existed and none was found.
+
+Important:
+- Only consider the 'Partial Document Text' provided for finding titles and associating new page numbers.
+- The output must be a valid JSON list of objects.
+Directly return *only* the final JSON list. Do not add any explanatory text before or after the JSON.
+""",
+    model=DEFAULT_AGENT_MODEL
+)
+
+PAGE_INDEX_DETECTOR_AGENT = Agent(
+    name="PageIndexDetectorAgent",
+    instructions="""You will be given a table of contents (ToC) text.
+Your job is to detect if there are page numbers or page indices explicitly mentioned within this ToC text.
+For example, entries like "Chapter 1 ..... 5" or "Section A ... Page 12" indicate page numbers are present.
+If entries are just titles like "Introduction", "Conclusion" without any trailing numbers that look like page references, then page numbers are not given.
+
+Reply in a JSON format:
+{
+    "thinking": "<Explain your reasoning why you think page numbers/indices are present or absent in the given ToC text.>",
+    "page_index_given_in_toc": "<'yes' or 'no'>"
+}
+Directly return the final JSON structure. Do not output anything else.
+""",
+    model=DEFAULT_AGENT_MODEL
+)
+# --- End Agent Definitions ---
 
 
 ################### check title in page #########################################################
-async def check_title_appearance(item, page_list, start_index=1, model=None):    
-    title=item['title']
+async def check_title_appearance(item, page_list, start_index=1): # model parameter removed
+    title = item['title']
     if 'physical_index' not in item or item['physical_index'] is None:
-        return {'list_index': item.get('list_index'), 'answer': 'no', 'title':title, 'page_number': None}
-    
+        return {'list_index': item.get('list_index'), 'answer': 'no', 'title': title, 'page_number': None}
     
     page_number = item['physical_index']
-    page_text = page_list[page_number-start_index][0]
+    page_text = page_list[page_number - start_index][0]
 
-    
-    prompt = f"""
-    Your job is to check if the given section appears or starts in the given page_text.
+    user_prompt_content = f"""
+    Please check the following:
+    Section Title: {title}
+    Page Text:
+    ---
+    {page_text}
+    ---
+    Remember to reply in the JSON format as specified in your instructions.
+    """ # The JSON structure is now part of the agent's instructions
 
-    Note: do fuzzy matching, ignore any space inconsistency in the page_text.
+    raw_response = await run_specific_agent(CHECK_TITLE_APPEARANCE_AGENT, user_prompt_content)
+    response_json = extract_json(raw_response)
 
-    The given section title is {title}.
-    The given page_text is {page_text}.
-    
-    Reply format:
-    {{
+    answer = 'no' # Default answer
+    if isinstance(response_json, dict) and 'answer' in response_json:
+        answer = response_json['answer']
+    # Consider logging if raw_response indicates an error from run_specific_agent
+    elif "Error: Agent execution failed" in str(raw_response):
+        # Optionally log the error from raw_response if needed, e.g., using a logger object if available
+        # print(f"Agent execution failed for title '{title}': {raw_response}") # Or use proper logging
+        pass # Defaults to 'no'
         
-        "thinking": <why do you think the section appears or starts in the page_text>
-        "answer": "yes or no" (yes if the section appears or starts in the page_text, no otherwise)
-    }}
-    Directly return the final JSON structure. Do not output anything else."""
-
-    response = await ChatGPT_API_async(model=model, prompt=prompt)
-    response = extract_json(response)
-    if 'answer' in response:
-        answer = response['answer']
-    else:
-        answer = 'no'
     return {'list_index': item['list_index'], 'answer': answer, 'title': title, 'page_number': page_number}
 
 
-async def check_title_appearance_in_start(title, page_text, model=None, logger=None):    
-    prompt = f"""
-    You will be given the current section title and the current page_text.
-    Your job is to check if the current section starts in the beginning of the given page_text.
-    If there are other contents before the current section title, then the current section does not start in the beginning of the given page_text.
-    If the current section title is the first content in the given page_text, then the current section starts in the beginning of the given page_text.
+async def check_title_appearance_in_start(title, page_text, logger=None): # model parameter removed
+    user_prompt_content = f"""
+    Please check if the section starts at the beginning of the page text:
+    Section Title: {title}
+    Page Text:
+    ---
+    {page_text}
+    ---
+    Remember to reply in the JSON format as specified in your instructions.
+    """ # JSON structure is in agent instructions
 
-    Note: do fuzzy matching, ignore any space inconsistency in the page_text.
+    raw_response = await run_specific_agent(CHECK_TITLE_START_AGENT, user_prompt_content)
+    response_json = extract_json(raw_response)
 
-    The given section title is {title}.
-    The given page_text is {page_text}.
-    
-    reply format:
-    {{
-        "thinking": <why do you think the section appears or starts in the page_text>
-        "start_begin": "yes or no" (yes if the section starts in the beginning of the page_text, no otherwise)
-    }}
-    Directly return the final JSON structure. Do not output anything else."""
-
-    response = await ChatGPT_API_async(model=model, prompt=prompt)
-    response = extract_json(response)
     if logger:
-        logger.info(f"Response: {response}")
-    return response.get("start_begin", "no")
+        # Log the structured JSON or raw response based on preference
+        logger.info(f"Agent response for title '{title}' start check: {response_json if isinstance(response_json, dict) else raw_response}")
+
+    start_begin = 'no' # Default
+    if isinstance(response_json, dict) and 'start_begin' in response_json:
+        start_begin = response_json['start_begin']
+    elif "Error: Agent execution failed" in str(raw_response) and logger:
+        logger.error(f"Agent execution failed for title '{title}' start check: {raw_response}")
+        
+    return start_begin
 
 
-async def check_title_appearance_in_start_concurrent(structure, page_list, model=None, logger=None):
+async def check_title_appearance_in_start_concurrent(structure, page_list, logger=None):
     if logger:
         logger.info("Checking title appearance in start concurrently")
     
@@ -86,7 +258,7 @@ async def check_title_appearance_in_start_concurrent(structure, page_list, model
     for item in structure:
         if item.get('physical_index') is not None:
             page_text = page_list[item['physical_index'] - 1][0]
-            tasks.append(check_title_appearance_in_start(item['title'], page_text, model=model, logger=logger))
+            tasks.append(check_title_appearance_in_start(item['title'], page_text, logger=logger))
             valid_items.append(item)
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -101,236 +273,225 @@ async def check_title_appearance_in_start_concurrent(structure, page_list, model
     return structure
 
 
-def toc_detector_single_page(content, model=None):
-    prompt = f"""
-    Your job is to detect if there is a table of content provided in the given text.
+async def toc_detector_single_page(content): # Changed to async, model parameter removed
+    user_prompt_content = f"""
+    Given text:
+    ---
+    {content}
+    ---
+    Please detect if a table of contents is present and reply in the JSON format as specified in your instructions.
+    """
 
-    Given text: {content}
-
-    return the following JSON format:
-    {{
-        "thinking": <why do you think there is a table of content in the given text>
-        "toc_detected": "<yes or no>",
-    }}
-
-    Directly return the final JSON structure. Do not output anything else.
-    Please note: abstract,summary, notation list, figure list, table list, etc. are not table of contents."""
-
-    response = ChatGPT_API(model=model, prompt=prompt)
-    # print('response', response)
-    json_content = extract_json(response)    
-    return json_content['toc_detected']
-
-
-def check_if_toc_extraction_is_complete(content, toc, model=None):
-    prompt = f"""
-    You are given a partial document  and a  table of contents.
-    Your job is to check if the  table of contents is complete, which it contains all the main sections in the partial document.
-
-    Reply format:
-    {{
-        "thinking": <why do you think the table of contents is complete or not>
-        "completed": "yes" or "no"
-    }}
-    Directly return the final JSON structure. Do not output anything else."""
-
-    prompt = prompt + '\n Document:\n' + content + '\n Table of contents:\n' + toc
-    response = ChatGPT_API(model=model, prompt=prompt)
-    json_content = extract_json(response)
-    return json_content['completed']
-
-
-def check_if_toc_transformation_is_complete(content, toc, model=None):
-    prompt = f"""
-    You are given a raw table of contents and a  table of contents.
-    Your job is to check if the  table of contents is complete.
-
-    Reply format:
-    {{
-        "thinking": <why do you think the cleaned table of contents is complete or not>
-        "completed": "yes" or "no"
-    }}
-    Directly return the final JSON structure. Do not output anything else."""
-
-    prompt = prompt + '\n Raw Table of contents:\n' + content + '\n Cleaned Table of contents:\n' + toc
-    response = ChatGPT_API(model=model, prompt=prompt)
-    json_content = extract_json(response)
-    return json_content['completed']
-
-def extract_toc_content(content, model=None):
-    prompt = f"""
-    Your job is to extract the full table of contents from the given text, replace ... with :
-
-    Given text: {content}
-
-    Directly return the full table of contents content. Do not output anything else."""
-
-    response, finish_reason = ChatGPT_API_with_finish_reason(model=model, prompt=prompt)
+    raw_response = await run_specific_agent(TOC_DETECTOR_AGENT, user_prompt_content)
+    json_content = extract_json(raw_response)
     
-    if_complete = check_if_toc_transformation_is_complete(content, response, model)
-    if if_complete == "yes" and finish_reason == "finished":
-        return response
-    
-    chat_history = [
-        {"role": "user", "content": prompt}, 
-        {"role": "assistant", "content": response},    
-    ]
-    prompt = f"""please continue the generation of table of contents , directly output the remaining part of the structure"""
-    new_response, finish_reason = ChatGPT_API_with_finish_reason(model=model, prompt=prompt, chat_history=chat_history)
-    response = response + new_response
-    if_complete = check_if_toc_transformation_is_complete(content, response, model)
-    
-    while not (if_complete == "yes" and finish_reason == "finished"):
-        chat_history = [
-            {"role": "user", "content": prompt}, 
-            {"role": "assistant", "content": response},    
-        ]
-        prompt = f"""please continue the generation of table of contents , directly output the remaining part of the structure"""
-        new_response, finish_reason = ChatGPT_API_with_finish_reason(model=model, prompt=prompt, chat_history=chat_history)
-        response = response + new_response
-        if_complete = check_if_toc_transformation_is_complete(content, response, model)
+    toc_detected = 'no' # Default
+    if isinstance(json_content, dict) and 'toc_detected' in json_content:
+        toc_detected = json_content['toc_detected']
+    elif "Error: Agent execution failed" in str(raw_response):
+        # Handle or log error, e.g.
+        # print(f"Agent execution failed for toc_detector_single_page: {raw_response}")
+        pass # Defaults to 'no'
         
-        # Optional: Add a maximum retry limit to prevent infinite loops
-        if len(chat_history) > 5:  # Arbitrary limit of 10 attempts
-            raise Exception('Failed to complete table of contents after maximum retries')
+    return toc_detected
+
+
+async def check_if_toc_extraction_is_complete(content, toc): # Changed to async, model removed
+    user_prompt_content = f"""
+    Given text:
+    ---
+    {content}
+    ---
+    Given table of contents (potentially partial or continued):
+    ---
+    {toc}
+    ---
+    Is the table of contents extraction complete? Please reply in the JSON format specified in your instructions.
+    """
+
+    raw_response = await run_specific_agent(TOC_EXTRACTION_COMPLETE_AGENT, user_prompt_content)
+    json_content = extract_json(raw_response)
     
-    return response
+    is_complete = 'no' # Default
+    if isinstance(json_content, dict) and 'complete' in json_content:
+        is_complete = json_content['complete']
+    elif "Error: Agent execution failed" in str(raw_response):
+        # Optionally log the error
+        # print(f"Agent execution failed for check_if_toc_extraction_is_complete: {raw_response}")
+        pass # Defaults to 'no'
+        
+    return is_complete
 
-def detect_page_index(toc_content, model=None):
-    print('start detect_page_index')
-    prompt = f"""
-    You will be given a table of contents.
 
-    Your job is to detect if there are page numbers/indices given within the table of contents.
+async def check_if_toc_transformation_is_complete(content, toc, logger=None): # model param removed, made async
+    user_prompt_content = f"""
+Raw Table of contents:
+---
+{content}
+---
+Cleaned/Structured Table of contents:
+---
+{toc}
+---
+Based on these, is the cleaned/structured ToC complete and accurate representation of the raw ToC?
+Please reply in the JSON format specified in your instructions for TOC_TRANSFORMATION_COMPLETE_AGENT.
+"""
+    raw_response = await run_specific_agent(TOC_TRANSFORMATION_COMPLETE_AGENT, user_prompt_content)
+    json_content = extract_json(raw_response)
 
-    Given text: {toc_content}
+    completed_status = 'no' # Default
+    if isinstance(json_content, dict) and 'completed' in json_content:
+        completed_status = json_content['completed']
+    elif "Error: Agent execution failed" in str(raw_response):
+        if logger:
+            logger.error(f"Agent execution failed for check_if_toc_transformation_is_complete: {raw_response}")
+        # Defaulting to 'no' as a safe measure
+    
+    if logger:
+        logger.info(f"check_if_toc_transformation_is_complete response: {json_content if isinstance(json_content, dict) else raw_response}, status: {completed_status}")
+        
+    return completed_status
 
-    Reply format:
-    {{
-        "thinking": <why do you think there are page numbers/indices given within the table of contents>
-        "page_index_given_in_toc": "<yes or no>"
-    }}
-    Directly return the final JSON structure. Do not output anything else."""
+async def extract_toc_content(content): # Changed to async, model removed, iterative loop removed
+    user_prompt_content = f"""
+    Please extract the full table of contents from the following text:
+    ---
+    {content}
+    ---
+    Remember to replace '...' with ':' where appropriate and return only the complete table of contents text.
+    """
 
-    response = ChatGPT_API(model=model, prompt=prompt)
-    json_content = extract_json(response)
-    return json_content['page_index_given_in_toc']
+    # The agent is expected to return the ToC text directly.
+    # run_specific_agent returns the 'final_output' from the agent.
+    toc_text = await run_specific_agent(EXTRACT_TOC_AGENT, user_prompt_content)
+    
+    # Check if the agent call itself failed (e.g. API key issue, agent SDK error)
+    if "Error: Agent execution failed" in str(toc_text):
+        # Handle or log error, perhaps return an empty string or raise an exception
+        # print(f"Agent execution failed for extract_toc_content: {toc_text}")
+        # Consider using logger if available: logger.error(f"Agent execution failed for extract_toc_content: {toc_text}")
+        return "" # Or raise an exception based on desired error handling
+        
+    return toc_text
 
-def toc_extractor(page_list, toc_page_list, model):
+async def detect_page_index(toc_content, logger=None): # model param removed, made async
+    # print('start detect_page_index') # Optional: keep if debugging needed
+    user_prompt_content = f"""
+Given table of contents text:
+---
+{toc_content}
+---
+Are page numbers/indices present in this table of contents?
+Please reply in the JSON format specified in your instructions for PAGE_INDEX_DETECTOR_AGENT.
+"""
+    raw_response = await run_specific_agent(PAGE_INDEX_DETECTOR_AGENT, user_prompt_content)
+    json_content = extract_json(raw_response)
+
+    page_index_given = 'no' # Default
+    if isinstance(json_content, dict) and 'page_index_given_in_toc' in json_content:
+        page_index_given = json_content['page_index_given_in_toc']
+    elif "Error: Agent execution failed" in str(raw_response):
+        if logger:
+            logger.error(f"Agent execution failed for detect_page_index: {raw_response}")
+        # Defaulting to 'no' as a safe measure
+        
+    if logger:
+        logger.info(f"detect_page_index response: {json_content if isinstance(json_content, dict) else raw_response}, page_index_given: {page_index_given}")
+
+    return page_index_given
+
+async def toc_extractor(page_list, toc_page_list, logger=None): # Made async, model param removed, logger added
     def transform_dots_to_colon(text):
+        # Replace 5 or more consecutive dots with ': '
         text = re.sub(r'\.{5,}', ': ', text)
-        # Handle dots separated by spaces
-        text = re.sub(r'(?:\. ){5,}\.?', ': ', text)
+        # Handle dots separated by spaces, e.g., ". . . . ."
+        text = re.sub(r'(?:\. ){4,}\.', ': ', text) # Matches '. . . . .' (at least 5 dots with 4 spaces)
         return text
     
-    toc_content = ""
+    toc_content_parts = []
     for page_index in toc_page_list:
-        toc_content += page_list[page_index][0]
-    toc_content = transform_dots_to_colon(toc_content)
-    has_page_index = detect_page_index(toc_content, model=model)
+        # Ensure page_index is within bounds of page_list
+        if 0 <= page_index < len(page_list):
+            toc_content_parts.append(page_list[page_index][0])
+        elif logger:
+            logger.warning(f"toc_extractor: page_index {page_index} out of bounds for page_list (len {len(page_list)}). Skipping.")
     
+    toc_content = "".join(toc_content_parts)
+    toc_content = transform_dots_to_colon(toc_content)
+    
+    # Pass logger to detect_page_index
+    has_page_index = await detect_page_index(toc_content, logger=logger) 
+    
+    if logger:
+        logger.info(f"toc_extractor result: page_index_given_in_toc='{has_page_index}'")
+
     return {
         "toc_content": toc_content,
         "page_index_given_in_toc": has_page_index
     }
 
+async def toc_index_extractor(toc, content): # Made async, model removed, uses ADD_PAGE_NUMBER_AGENT
+    # print('start toc_index_extractor') # Optional: keep if debugging needed
+    # Ensure toc is a JSON string for the agent. If it's already a Python list/dict, json.dumps it.
+    # Assuming 'toc' is a Python object (list of dicts) as per typical usage.
+    toc_json_string = json.dumps(toc, indent=2)
+
+    user_prompt_content = f"""
+    Partial Document Text:
+    ---
+    {content}
+    ---
+    Given ToC Structure:
+    ---
+    {toc_json_string}
+    ---
+    Please process the "Given ToC Structure" against the "Partial Document Text" and return an updated JSON list with "physical_index" fields populated or preserved as per your instructions for ADD_PAGE_NUMBER_AGENT.
+    Focus on adding physical_index to sections found in the provided pages. If a section isn't in these pages, its physical_index should remain unchanged from the input ToC Structure.
+    """
+
+    raw_response = await run_specific_agent(ADD_PAGE_NUMBER_AGENT, user_prompt_content)
+    json_result = extract_json(raw_response)
+
+    if not isinstance(json_result, list):
+        # Fallback or error handling if agent doesn't return a list
+        # print(f"toc_index_extractor: Agent returned malformed JSON or not a list. Raw: {raw_response}")
+        # Consider using a logger and returning the original toc or an empty list
+        return toc # Or [] or raise Exception("Agent failed to return valid JSON list for toc_index_extractor")
+
+    return json_result
 
 
 
-def toc_index_extractor(toc, content, model=None):
-    print('start toc_index_extractor')
-    tob_extractor_prompt = """
-    You are given a table of contents in a json format and several pages of a document, your job is to add the physical_index to the table of contents in the json format.
-
-    The provided pages contains tags like <physical_index_X> and <physical_index_X> to indicate the physical location of the page X.
-
-    The structure variable is the numeric system which represents the index of the hierarchy section in the table of contents. For example, the first section has structure index 1, the first subsection has structure index 1.1, the second subsection has structure index 1.2, etc.
-
-    The response should be in the following JSON format: 
-    [
-        {
-            "structure": <structure index, "x.x.x" or None> (string),
-            "title": <title of the section>,
-            "physical_index": "<physical_index_X>" (keep the format)
-        },
-        ...
-    ]
-
-    Only add the physical_index to the sections that are in the provided pages.
-    If the section is not in the provided pages, do not add the physical_index to it.
-    Directly return the final JSON structure. Do not output anything else."""
-
-    prompt = tob_extractor_prompt + '\nTable of contents:\n' + str(toc) + '\nDocument pages:\n' + content
-    response = ChatGPT_API(model=model, prompt=prompt)
-    json_content = extract_json(response)    
-    return json_content
-
-
-
-def toc_transformer(toc_content, model=None):
+async def toc_transformer(toc_content): # Changed to async, model & loop removed
     print('start toc_transformer')
-    init_prompt = """
-    You are given a table of contents, You job is to transform the whole table of content into a JSON format included table_of_contents.
+    user_prompt_content = f"""
+    Please transform the following table of contents text into the JSON structure specified in your instructions.
+    Raw Table of Contents Text:
+    ---
+    {toc_content}
+    ---
+    """
 
-    structure is the numeric system which represents the index of the hierarchy section in the table of contents. For example, the first section has structure index 1, the first subsection has structure index 1.1, the second subsection has structure index 1.2, etc.
-
-    The response should be in the following JSON format: 
-    {
-    table_of_contents: [
-        {
-            "structure": <structure index, "x.x.x" or None> (string),
-            "title": <title of the section>,
-            "page": <page number or None>,
-        },
-        ...
-        ],
-    }
-    You should transform the full table of contents in one go.
-    Directly return the final JSON structure, do not output anything else. """
-
-    prompt = init_prompt + '\n Given table of contents\n:' + toc_content
-    last_complete, finish_reason = ChatGPT_API_with_finish_reason(model=model, prompt=prompt)
-    if_complete = check_if_toc_transformation_is_complete(toc_content, last_complete, model)
-    if if_complete == "yes" and finish_reason == "finished":
-        last_complete = extract_json(last_complete)
-        cleaned_response=convert_page_to_int(last_complete['table_of_contents'])
-        return cleaned_response
+    raw_response = await run_specific_agent(TOC_JSON_TRANSFORMER_AGENT, user_prompt_content)
     
-    last_complete = get_json_content(last_complete)
-    while not (if_complete == "yes" and finish_reason == "finished"):
-        position = last_complete.rfind('}')
-        if position != -1:
-            last_complete = last_complete[:position+2]
-        prompt = f"""
-        Your task is to continue the table of contents json structure, directly output the remaining part of the json structure.
-        The response should be in the following JSON format: 
+    transformed_json = extract_json(raw_response) # extract_json should handle potential markdown/text around JSON
 
-        The raw table of contents json structure is:
-        {toc_content}
-
-        The incomplete transformed table of contents json structure is:
-        {last_complete}
-
-        Please continue the json structure, directly output the remaining part of the json structure."""
-
-        new_complete, finish_reason = ChatGPT_API_with_finish_reason(model=model, prompt=prompt)
-
-        if new_complete.startswith('```json'):
-            new_complete =  get_json_content(new_complete)
-            last_complete = last_complete+new_complete
-
-        if_complete = check_if_toc_transformation_is_complete(toc_content, last_complete, model)
-        
-
-    last_complete = json.loads(last_complete)
-
-    cleaned_response=convert_page_to_int(last_complete['table_of_contents'])
-    return cleaned_response
+    if not isinstance(transformed_json, dict) or 'table_of_contents' not in transformed_json:
+        # Log error or handle appropriately if agent fails or returns unexpected structure
+        # For now, returning empty list to somewhat match original error paths
+        # print(f"toc_transformer: Agent failed or returned malformed JSON. Raw: {raw_response}")
+        # Consider using a logger if available: logger.error(f"toc_transformer: Agent failed or returned malformed JSON. Raw: {raw_response}")
+        return [] 
+    
+    # convert_page_to_int is assumed to be synchronous and operate on the list
+    cleaned_toc_list = convert_page_to_int(transformed_json['table_of_contents'])
+    
+    return cleaned_toc_list
     
 
 
 
-def find_toc_pages(start_page_index, page_list, opt, logger=None):
+async def find_toc_pages(start_page_index, page_list, opt, logger=None): # Changed to async
     print('start find_toc_pages')
     last_page_is_yes = False
     toc_page_list = []
@@ -340,13 +501,14 @@ def find_toc_pages(start_page_index, page_list, opt, logger=None):
         # Only check beyond max_pages if we're still finding TOC pages
         if i >= opt.toc_check_page_num and not last_page_is_yes:
             break
-        detected_result = toc_detector_single_page(page_list[i][0],model=opt.model)
+        # Call the now async toc_detector_single_page
+        detected_result = await toc_detector_single_page(page_list[i][0]) # model=opt.model removed
         if detected_result == 'yes':
             if logger:
                 logger.info(f'Page {i} has toc')
             toc_page_list.append(i)
             last_page_is_yes = True
-        elif detected_result == 'no' and last_page_is_yes:
+        elif detected_result == 'no' and last_page_is_yes: # This logic remains the same
             if logger:
                 logger.info(f'Found the last page with toc: {i-1}')
             break
@@ -450,36 +612,34 @@ def page_list_to_group_text(page_contents, token_lengths, max_tokens=20000, over
     print('divide page_list to groups', len(subsets))
     return subsets
 
-def add_page_number_to_toc(part, structure, model=None):
-    fill_prompt_seq = """
-    You are given an JSON structure of a document and a partial part of the document. Your task is to check if the title that is described in the structure is started in the partial given document.
+async def add_page_number_to_toc(part, structure): # Changed to async, model removed
+    # Convert structure (Python list of dicts) to JSON string for the agent prompt
+    structure_json_string = json.dumps(structure, indent=2)
 
-    The provided text contains tags like <physical_index_X> and <physical_index_X> to indicate the physical location of the page X. 
+    user_prompt_content = f"""
+    Partial Document Text:
+    ---
+    {part}
+    ---
+    Given ToC Structure:
+    ---
+    {structure_json_string}
+    ---
+    Please process the "Given ToC Structure" against the "Partial Document Text" and return an updated JSON list with "physical_index" fields populated or preserved as per your instructions.
+    """
 
-    If the full target section starts in the partial given document, insert the given JSON structure with the "start": "yes", and "start_index": "<physical_index_X>".
-
-    If the full target section does not start in the partial given document, insert "start": "no",  "start_index": None.
-
-    The response should be in the following format. 
-        [
-            {
-                "structure": <structure index, "x.x.x" or None> (string),
-                "title": <title of the section>,
-                "start": "<yes or no>",
-                "physical_index": "<physical_index_X> (keep the format)" or None
-            },
-            ...
-        ]    
-    The given structure contains the result of the previous part, you need to fill the result of the current part, do not change the previous result.
-    Directly return the final JSON structure. Do not output anything else."""
-
-    prompt = fill_prompt_seq + f"\n\nCurrent Partial Document:\n{part}\n\nGiven Structure\n{json.dumps(structure, indent=2)}\n"
-    current_json_raw = ChatGPT_API(model=model, prompt=prompt)
-    json_result = extract_json(current_json_raw)
+    raw_response = await run_specific_agent(ADD_PAGE_NUMBER_AGENT, user_prompt_content)
     
-    for item in json_result:
-        if 'start' in item:
-            del item['start']
+    json_result = extract_json(raw_response)
+
+    if not isinstance(json_result, list):
+        # Handle error: agent did not return a list or JSON was malformed
+        # print(f"add_page_number_to_toc: Agent returned malformed JSON or not a list. Raw: {raw_response}")
+        # Consider using a logger if available
+        # Fallback to returning the original structure or an empty list, or raise an error
+        return structure # Or [] or raise Exception("Agent failed to return valid JSON list for add_page_number_to_toc")
+        
+    # The agent should directly return the desired structure, so no need to delete 'start' fields.
     return json_result
 
 
@@ -494,114 +654,72 @@ def remove_first_physical_index_section(text):
         # Remove the first matched section
         return text.replace(match.group(0), '', 1)
     return text
-
-### add verify completeness
-def generate_toc_continue(toc_content, part, model="gpt-4o-2024-11-20"):
-    print('start generate_toc_continue')
-    prompt = """
-    You are an expert in extracting hierarchical tree structure.
-    You are given a tree structure of the previous part and the text of the current part.
-    Your task is to continue the tree structure from the previous part to include the current part.
-
-    The structure variable is the numeric system which represents the index of the hierarchy section in the table of contents. For example, the first section has structure index 1, the first subsection has structure index 1.1, the second subsection has structure index 1.2, etc.
-
-    For the title, you need to extract the original title from the text, only fix the space inconsistency.
-
-    The provided text contains tags like <physical_index_X> and <physical_index_X> to indicate the start and end of page X. \
-    
-    For the physical_index, you need to extract the physical index of the start of the section from the text. Keep the <physical_index_X> format.
-
-    The response should be in the following format. 
-        [
-            {
-                "structure": <structure index, "x.x.x"> (string),
-                "title": <title of the section, keep the original title>,
-                "physical_index": "<physical_index_X> (keep the format)"
-            },
-            ...
-        ]    
-
-    Directly return the additional part of the final JSON structure. Do not output anything else."""
-
-    prompt = prompt + '\nGiven text\n:' + part + '\nPrevious tree structure\n:' + json.dumps(toc_content, indent=2)
-    response, finish_reason = ChatGPT_API_with_finish_reason(model=model, prompt=prompt)
-    if finish_reason == 'finished':
-        return extract_json(response)
-    else:
-        raise Exception(f'finish reason: {finish_reason}')
-    
-### add verify completeness
-def generate_toc_init(part, model=None):
-    print('start generate_toc_init')
-    prompt = """
-    You are an expert in extracting hierarchical tree structure, your task is to generate the tree structure of the document.
-
-    The structure variable is the numeric system which represents the index of the hierarchy section in the table of contents. For example, the first section has structure index 1, the first subsection has structure index 1.1, the second subsection has structure index 1.2, etc.
-
-    For the title, you need to extract the original title from the text, only fix the space inconsistency.
-
-    The provided text contains tags like <physical_index_X> and <physical_index_X> to indicate the start and end of page X. 
-
-    For the physical_index, you need to extract the physical index of the start of the section from the text. Keep the <physical_index_X> format.
-
-    The response should be in the following format. 
-        [
-            {{
-                "structure": <structure index, "x.x.x"> (string),
-                "title": <title of the section, keep the original title>,
-                "physical_index": "<physical_index_X> (keep the format)"
-            }},
-            
-        ],
-
-
-    Directly return the final JSON structure. Do not output anything else."""
-
-    prompt = prompt + '\nGiven text\n:' + part
-    response, finish_reason = ChatGPT_API_with_finish_reason(model=model, prompt=prompt)
-
-    if finish_reason == 'finished':
-         return extract_json(response)
-    else:
-        raise Exception(f'finish reason: {finish_reason}')
-
-def process_no_toc(page_list, start_index=1, model=None, logger=None):
+async def process_no_toc(page_list, start_index=1, logger=None): # model param removed, made async
     page_contents=[]
     token_lengths=[]
+    # Determine model for count_tokens, perhaps from DEFAULT_AGENT_MODEL or a config
+    # For now, assuming count_tokens can handle model=None or we use a default like 'gpt-4o'
+    # This might need adjustment if count_tokens strictly requires a model string.
+    token_model_for_counting = DEFAULT_AGENT_MODEL # Or some other appropriate model string
+
     for page_index in range(start_index, start_index+len(page_list)):
         page_text = f"<physical_index_{page_index}>\n{page_list[page_index-start_index][0]}\n<physical_index_{page_index}>\n\n"
         page_contents.append(page_text)
-        token_lengths.append(count_tokens(page_text, model))
+        token_lengths.append(count_tokens(page_text, token_model_for_counting)) # Pass a model for token counting
+    
     group_texts = page_list_to_group_text(page_contents, token_lengths)
-    logger.info(f'len(group_texts): {len(group_texts)}')
+    if logger:
+        logger.info(f'process_no_toc: len(group_texts): {len(group_texts)}')
 
-    toc_with_page_number= generate_toc_init(group_texts[0], model)
-    for group_text in group_texts[1:]:
-        toc_with_page_number_additional = generate_toc_continue(toc_with_page_number, group_text, model)    
-        toc_with_page_number.extend(toc_with_page_number_additional)
-    logger.info(f'generate_toc: {toc_with_page_number}')
+    full_toc_from_agent = []
+    for i, group_text_chunk in enumerate(group_texts):
+        user_prompt_content = f"""
+        Document Text Chunk {i+1}/{len(group_texts)}:
+        ---
+        {group_text_chunk}
+        ---
+        Please generate table of contents items from this text chunk according to your instructions.
+        If this is not the first chunk (i.e., chunk number > 1), assume it might be a continuation of a ToC from previous chunk(s) when determining structure numbers.
+        """
+        
+        # print(f"Calling CREATE_TOC_FROM_CONTENT_AGENT for chunk {i+1}") # For debugging
+        raw_response = await run_specific_agent(CREATE_TOC_FROM_CONTENT_AGENT, user_prompt_content)
+        chunk_toc_items = extract_json(raw_response)
+        
+        if isinstance(chunk_toc_items, list):
+            full_toc_from_agent.extend(chunk_toc_items)
+        else:
+            if logger:
+                logger.warning(f"process_no_toc: Agent returned non-list or malformed JSON for chunk {i+1}. Raw: {raw_response}. Skipping this chunk's ToC items.")
+            # print(f"process_no_toc: Agent returned non-list for chunk {i+1}. Raw: {raw_response}") # For debugging
 
-    toc_with_page_number = convert_physical_index_to_int(toc_with_page_number)
-    logger.info(f'convert_physical_index_to_int: {toc_with_page_number}')
+    if logger:
+        logger.info(f'process_no_toc: Raw ToC from agent: {full_toc_from_agent}')
 
-    return toc_with_page_number
+    # It's possible the agent might sometimes return numbers in physical_index, but prompt asks for string tag.
+    # convert_physical_index_to_int expects string tags like "<physical_index_123>"
+    toc_with_page_number_int = convert_physical_index_to_int(full_toc_from_agent)
+    if logger:
+        logger.info(f'process_no_toc: Converted physical_index to int: {toc_with_page_number_int}')
 
-def process_toc_no_page_numbers(toc_content, toc_page_list, page_list,  start_index=1, model=None, logger=None):
+    return toc_with_page_number_int
+
+async def process_toc_no_page_numbers(toc_content, toc_page_list, page_list,  start_index=1, logger=None): # Made async, model param removed
     page_contents=[]
     token_lengths=[]
-    toc_content = toc_transformer(toc_content, model)
+    toc_content = await toc_transformer(toc_content) # Now async, model param removed
     logger.info(f'toc_transformer: {toc_content}')
     for page_index in range(start_index, start_index+len(page_list)):
         page_text = f"<physical_index_{page_index}>\n{page_list[page_index-start_index][0]}\n<physical_index_{page_index}>\n\n"
         page_contents.append(page_text)
-        token_lengths.append(count_tokens(page_text, model))
+        token_lengths.append(count_tokens(page_text, DEFAULT_AGENT_MODEL)) # Use default agent model for token counting
     
     group_texts = page_list_to_group_text(page_contents, token_lengths)
     logger.info(f'len(group_texts): {len(group_texts)}')
 
     toc_with_page_number=copy.deepcopy(toc_content)
     for group_text in group_texts:
-        toc_with_page_number = add_page_number_to_toc(group_text, toc_with_page_number, model)
+        toc_with_page_number = await add_page_number_to_toc(group_text, toc_with_page_number) # Now async, model param removed
     logger.info(f'add_page_number_to_toc: {toc_with_page_number}')
 
     toc_with_page_number = convert_physical_index_to_int(toc_with_page_number)
@@ -611,8 +729,8 @@ def process_toc_no_page_numbers(toc_content, toc_page_list, page_list,  start_in
 
 
 
-def process_toc_with_page_numbers(toc_content, toc_page_list, page_list, toc_check_page_num=None, model=None, logger=None):
-    toc_with_page_number = toc_transformer(toc_content, model)
+async def process_toc_with_page_numbers(toc_content, toc_page_list, page_list, toc_check_page_num=None, logger=None): # Made async, model param removed
+    toc_with_page_number = await toc_transformer(toc_content) # Now async, model param removed
     logger.info(f'toc_with_page_number: {toc_with_page_number}')
 
     toc_no_page_number = remove_page_number(copy.deepcopy(toc_with_page_number))
@@ -622,7 +740,7 @@ def process_toc_with_page_numbers(toc_content, toc_page_list, page_list, toc_che
     for page_index in range(start_page_index, min(start_page_index + toc_check_page_num, len(page_list))):
         main_content += f"<physical_index_{page_index+1}>\n{page_list[page_index][0]}\n<physical_index_{page_index+1}>\n\n"
 
-    toc_with_physical_index = toc_index_extractor(toc_no_page_number, main_content, model)
+    toc_with_physical_index = await toc_index_extractor(toc_no_page_number, main_content) # Now async, model param removed
     logger.info(f'toc_with_physical_index: {toc_with_physical_index}')
 
     toc_with_physical_index = convert_physical_index_to_int(toc_with_physical_index)
@@ -637,7 +755,7 @@ def process_toc_with_page_numbers(toc_content, toc_page_list, page_list, toc_che
     toc_with_page_number = add_page_offset_to_toc_json(toc_with_page_number, offset)
     logger.info(f'toc_with_page_number: {toc_with_page_number}')
 
-    toc_with_page_number = process_none_page_numbers(toc_with_page_number, page_list, model=model)
+    toc_with_page_number = await process_none_page_numbers(toc_with_page_number, page_list) # Now async, model param removed
     logger.info(f'toc_with_page_number: {toc_with_page_number}')
 
     return toc_with_page_number
@@ -645,7 +763,7 @@ def process_toc_with_page_numbers(toc_content, toc_page_list, page_list, toc_che
 
 
 ##check if needed to process none page numbers
-def process_none_page_numbers(toc_items, page_list, start_index=1, model=None):
+async def process_none_page_numbers(toc_items, page_list, start_index=1): # Made async, model param removed
     for i, item in enumerate(toc_items):
         if "physical_index" not in item:
             # logger.info(f"fix item: {item}")
@@ -674,28 +792,26 @@ def process_none_page_numbers(toc_items, page_list, start_index=1, model=None):
                     continue
 
             item_copy = copy.deepcopy(item)
-            del item_copy['page']
-            result = add_page_number_to_toc(page_contents, item_copy, model)
+            item_copy.pop('page', None)
+            result = await add_page_number_to_toc(page_contents, item_copy) # Now async, model param removed
             if isinstance(result[0]['physical_index'], str) and result[0]['physical_index'].startswith('<physical_index'):
                 item['physical_index'] = int(result[0]['physical_index'].split('_')[-1].rstrip('>').strip())
-                del item['page']
+                item.pop('page', None)
     
     return toc_items
 
 
-
-
-def check_toc(page_list, opt=None):
-    toc_page_list = find_toc_pages(start_page_index=0, page_list=page_list, opt=opt)
+async def check_toc(page_list, opt=None, logger=None):
+    toc_page_list = await find_toc_pages(start_page_index=0, page_list=page_list, opt=opt)
     if len(toc_page_list) == 0:
-        print('no toc found')
+        logger.info('no toc found') if logger else print('no toc found')
         return {'toc_content': None, 'toc_page_list': [], 'page_index_given_in_toc': 'no'}
     else:
-        print('toc found')
-        toc_json = toc_extractor(page_list, toc_page_list, opt.model)
+        logger.info('toc found') if logger else print('toc found')
+        toc_json = await toc_extractor(page_list, toc_page_list, logger=logger)
 
         if toc_json['page_index_given_in_toc'] == 'yes':
-            print('index found')
+            logger.info('index found') if logger else print('index found')
             return {'toc_content': toc_json['toc_content'], 'toc_page_list': toc_page_list, 'page_index_given_in_toc': 'yes'}
         else:
             current_start_index = toc_page_list[-1] + 1
@@ -704,7 +820,7 @@ def check_toc(page_list, opt=None):
                    current_start_index < len(page_list) and 
                    current_start_index < opt.toc_check_page_num):
                 
-                additional_toc_pages = find_toc_pages(
+                additional_toc_pages = await find_toc_pages(
                     start_page_index=current_start_index,
                     page_list=page_list,
                     opt=opt
@@ -713,44 +829,53 @@ def check_toc(page_list, opt=None):
                 if len(additional_toc_pages) == 0:
                     break
 
-                additional_toc_json = toc_extractor(page_list, additional_toc_pages, opt.model)
+                additional_toc_json = await toc_extractor(page_list, additional_toc_pages, logger=logger)
                 if additional_toc_json['page_index_given_in_toc'] == 'yes':
-                    print('index found')
+                    logger.info('index found') if logger else print('index found')
                     return {'toc_content': additional_toc_json['toc_content'], 'toc_page_list': additional_toc_pages, 'page_index_given_in_toc': 'yes'}
 
                 else:
                     current_start_index = additional_toc_pages[-1] + 1
-            print('index not found')
+            logger.info('index not found') if logger else print('index not found')
             return {'toc_content': toc_json['toc_content'], 'toc_page_list': toc_page_list, 'page_index_given_in_toc': 'no'}
 
 
 
 
-
-
 ################### fix incorrect toc #########################################################
-def single_toc_item_index_fixer(section_title, content, model="gpt-4o-2024-11-20"):
-    tob_extractor_prompt = """
-    You are given a section title and several pages of a document, your job is to find the physical index of the start page of the section in the partial document.
+async def single_toc_item_index_fixer(section_title, content): # Made async, model param removed
+    user_prompt_content = f"""
+Section Title:
+---
+{section_title}
+---
+Partial Document Text:
+---
+{content}
+---
+Please find the physical_index for the section title in the provided text, adhering to the SINGLE_TOC_ITEM_FIXER_AGENT instructions.
+"""
+    raw_response = await run_specific_agent(SINGLE_TOC_ITEM_FIXER_AGENT, user_prompt_content)
+    json_content = extract_json(raw_response)
 
-    The provided pages contains tags like <physical_index_X> and <physical_index_X> to indicate the physical location of the page X.
+    if json_content and isinstance(json_content, dict) and 'physical_index' in json_content:
+        physical_index_str = json_content['physical_index']
+        if physical_index_str: # Check if it's not None or empty
+            return convert_physical_index_to_int(physical_index_str)
+    
+    # Fallback if physical_index is not found, is None, or JSON is malformed
+    # Depending on desired behavior, you might return None, raise an error, or return a specific value.
+    # Returning None or a value that signifies "not found" is often safest.
+    # The original function would error if 'physical_index' was missing or if convert_physical_index_to_int failed.
+    # Let's return None to indicate it couldn't be determined, which calling functions might need to handle.
+    if logger:
+        logger.warning(f"single_toc_item_index_fixer could not determine physical_index for title '{section_title}'. Raw response: {raw_response}")
+    return None # Or handle error as appropriate
 
-    Reply in a JSON format:
-    {
-        "thinking": <explain which page, started and closed by <physical_index_X>, contains the start of this section>,
-        "physical_index": "<physical_index_X>" (keep the format)
-    }
-    Directly return the final JSON structure. Do not output anything else."""
-
-    prompt = tob_extractor_prompt + '\nSection Title:\n' + str(section_title) + '\nDocument pages:\n' + content
-    response = ChatGPT_API(model=model, prompt=prompt)
-    json_content = extract_json(response)    
-    return convert_physical_index_to_int(json_content['physical_index'])
 
 
-
-async def fix_incorrect_toc(toc_with_page_number, page_list, incorrect_results, start_index=1, model=None, logger=None):
-    print(f'start fix_incorrect_toc with {len(incorrect_results)} incorrect results')
+async def fix_incorrect_toc(toc_with_page_number, page_list, incorrect_results, start_index=1, logger=None):
+    logger.info(f'start fix_incorrect_toc with {len(incorrect_results)} incorrect results') if logger else print(f'start fix_incorrect_toc with {len(incorrect_results)} incorrect results')
     incorrect_indices = {result['list_index'] for result in incorrect_results}
     
     end_index = len(page_list) + start_index - 1
@@ -812,12 +937,12 @@ async def fix_incorrect_toc(toc_with_page_number, page_list, incorrect_results, 
                 continue
         content_range = ''.join(page_contents)
         
-        physical_index_int = single_toc_item_index_fixer(incorrect_item['title'], content_range, model)
+        physical_index_int = await single_toc_item_index_fixer(incorrect_item['title'], content_range)
         
         # Check if the result is correct
         check_item = incorrect_item.copy()
         check_item['physical_index'] = physical_index_int
-        check_result = await check_title_appearance(check_item, page_list, start_index, model)
+        check_result = await check_title_appearance(check_item, page_list, start_index)
 
         return {
             'list_index': list_index,
@@ -834,7 +959,7 @@ async def fix_incorrect_toc(toc_with_page_number, page_list, incorrect_results, 
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for item, result in zip(incorrect_results, results):
         if isinstance(result, Exception):
-            print(f"Processing item {item} generated an exception: {result}")
+            logger.error(f"Processing item {item} generated an exception: {result}") if logger else print(f"Processing item {item} generated an exception: {result}")
             continue
     results = [result for result in results if not isinstance(result, Exception)]
 
@@ -867,16 +992,16 @@ async def fix_incorrect_toc(toc_with_page_number, page_list, incorrect_results, 
 
 
 
-async def fix_incorrect_toc_with_retries(toc_with_page_number, page_list, incorrect_results, start_index=1, max_attempts=3, model=None, logger=None):
-    print('start fix_incorrect_toc')
+async def fix_incorrect_toc_with_retries(toc_with_page_number, page_list, incorrect_results, start_index=1, max_attempts=3, logger=None):
+    logger.info('start fix_incorrect_toc_with_retries') if logger else print('start fix_incorrect_toc_with_retries')
     fix_attempt = 0
     current_toc = toc_with_page_number
     current_incorrect = incorrect_results
 
     while current_incorrect:
-        print(f"Fixing {len(current_incorrect)} incorrect results")
+        logger.info(f"Fixing {len(current_incorrect)} incorrect results") if logger else print(f"Fixing {len(current_incorrect)} incorrect results")
         
-        current_toc, current_incorrect = await fix_incorrect_toc(current_toc, page_list, current_incorrect, start_index, model, logger)
+        current_toc, current_incorrect = await fix_incorrect_toc(current_toc, page_list, current_incorrect, start_index, logger)
                 
         fix_attempt += 1
         if fix_attempt >= max_attempts:
@@ -889,8 +1014,8 @@ async def fix_incorrect_toc_with_retries(toc_with_page_number, page_list, incorr
 
 
 ################### verify toc #########################################################
-async def verify_toc(page_list, list_result, start_index=1, N=None, model=None):
-    print('start verify_toc')
+async def verify_toc(page_list, list_result, start_index=1, N=None, logger=None):
+    logger.info('start verify_toc') if logger else print('start verify_toc')
     # Find the last non-None physical_index
     last_physical_index = None
     for item in reversed(list_result):
@@ -904,11 +1029,11 @@ async def verify_toc(page_list, list_result, start_index=1, N=None, model=None):
     
     # Determine which items to check
     if N is None:
-        print('check all items')
+        logger.info('check all items') if logger else print('check all items')
         sample_indices = range(0, len(list_result))
     else:
         N = min(N, len(list_result))
-        print(f'check {N} items')
+        logger.info(f'check {N} items') if logger else print(f'check {N} items')
         sample_indices = random.sample(range(0, len(list_result)), N)
 
     # Prepare items with their list indices
@@ -923,7 +1048,7 @@ async def verify_toc(page_list, list_result, start_index=1, N=None, model=None):
 
     # Run checks concurrently
     tasks = [
-        check_title_appearance(item, page_list, start_index, model)
+        check_title_appearance(item, page_list, start_index)
         for item in indexed_sample_list
     ]
     results = await asyncio.gather(*tasks)
@@ -940,7 +1065,7 @@ async def verify_toc(page_list, list_result, start_index=1, N=None, model=None):
     # Calculate accuracy
     checked_count = len(results)
     accuracy = correct_count / checked_count if checked_count > 0 else 0
-    print(f"accuracy: {accuracy*100:.2f}%")
+    logger.info(f"accuracy: {accuracy*100:.2f}%") if logger else print(f"accuracy: {accuracy*100:.2f}%")
     return accuracy, incorrect_results
 
 
@@ -949,15 +1074,15 @@ async def verify_toc(page_list, list_result, start_index=1, N=None, model=None):
 
 ################### main process #########################################################
 async def meta_processor(page_list, mode=None, toc_content=None, toc_page_list=None, start_index=1, opt=None, logger=None):
-    print(mode)
-    print(f'start_index: {start_index}')
+    logger.info(f"meta_processor mode: {mode}") if logger else print(mode)
+    logger.info(f"meta_processor start_index: {start_index}") if logger else print(f'start_index: {start_index}')
     
     if mode == 'process_toc_with_page_numbers':
-        toc_with_page_number = process_toc_with_page_numbers(toc_content, toc_page_list, page_list, toc_check_page_num=opt.toc_check_page_num, model=opt.model, logger=logger)
+        toc_with_page_number = await process_toc_with_page_numbers(toc_content, toc_page_list, page_list, toc_check_page_num=opt.toc_check_page_num, logger=logger) # Now async, model param removed
     elif mode == 'process_toc_no_page_numbers':
-        toc_with_page_number = process_toc_no_page_numbers(toc_content, toc_page_list, page_list, model=opt.model, logger=logger)
+        toc_with_page_number = await process_toc_no_page_numbers(toc_content, toc_page_list, page_list, logger=logger) # Now async, model param removed
     else:
-        toc_with_page_number = process_no_toc(page_list, start_index=start_index, model=opt.model, logger=logger)
+        toc_with_page_number = await process_no_toc(page_list, start_index=start_index, logger=logger)
             
     toc_with_page_number = [item for item in toc_with_page_number if item.get('physical_index') is not None] 
     
@@ -968,7 +1093,7 @@ async def meta_processor(page_list, mode=None, toc_content=None, toc_page_list=N
         logger=logger
     )
     
-    accuracy, incorrect_results = await verify_toc(page_list, toc_with_page_number, start_index=start_index, model=opt.model)
+    accuracy, incorrect_results = await verify_toc(page_list, toc_with_page_number, start_index=start_index, logger=logger)
         
     logger.info({
         'mode': 'process_toc_with_page_numbers',
@@ -978,7 +1103,7 @@ async def meta_processor(page_list, mode=None, toc_content=None, toc_page_list=N
     if accuracy == 1.0 and len(incorrect_results) == 0:
         return toc_with_page_number
     if accuracy > 0.6 and len(incorrect_results) > 0:
-        toc_with_page_number, incorrect_results = await fix_incorrect_toc_with_retries(toc_with_page_number, page_list, incorrect_results,start_index=start_index, max_attempts=3, model=opt.model, logger=logger)
+        toc_with_page_number, incorrect_results = await fix_incorrect_toc_with_retries(toc_with_page_number, page_list, incorrect_results,start_index=start_index, max_attempts=3, logger=logger)
         return toc_with_page_number
     else:
         if mode == 'process_toc_with_page_numbers':
@@ -994,10 +1119,10 @@ async def process_large_node_recursively(node, page_list, opt=None, logger=None)
     token_num = sum([page[1] for page in node_page_list])
     
     if node['end_index'] - node['start_index'] > opt.max_page_num_each_node and token_num >= opt.max_token_num_each_node:
-        print('large node:', node['title'], 'start_index:', node['start_index'], 'end_index:', node['end_index'], 'token_num:', token_num)
+        logger.info(f"large node: {node['title']}, start_index: {node['start_index']}, end_index: {node['end_index']}, token_num: {token_num}") if logger else print('large node:', node['title'], 'start_index:', node['start_index'], 'end_index:', node['end_index'], 'token_num:', token_num)
 
         node_toc_tree = await meta_processor(node_page_list, mode='process_no_toc', start_index=node['start_index'], opt=opt, logger=logger)
-        node_toc_tree = await check_title_appearance_in_start_concurrent(node_toc_tree, page_list, model=opt.model, logger=logger)
+        node_toc_tree = await check_title_appearance_in_start_concurrent(node_toc_tree, page_list, logger=logger)
         
         # Filter out items with None physical_index before post_processing
         valid_node_toc_items = [item for item in node_toc_tree if item.get('physical_index') is not None]
@@ -1019,7 +1144,7 @@ async def process_large_node_recursively(node, page_list, opt=None, logger=None)
     return node
 
 async def tree_parser(page_list, opt, doc=None, logger=None):
-    check_toc_result = check_toc(page_list, opt)
+    check_toc_result = await check_toc(page_list, opt, logger=logger)
     logger.info(check_toc_result)
 
     if check_toc_result.get("toc_content") and check_toc_result["toc_content"].strip() and check_toc_result["page_index_given_in_toc"] == "yes":
@@ -1040,9 +1165,9 @@ async def tree_parser(page_list, opt, doc=None, logger=None):
             logger=logger)
 
     toc_with_page_number = add_preface_if_needed(toc_with_page_number)
-    toc_with_page_number = await check_title_appearance_in_start_concurrent(toc_with_page_number, page_list, model=opt.model, logger=logger)
+    toc_with_page_number = await check_title_appearance_in_start_concurrent(toc_with_page_number, page_list, logger=logger)
     
-    # Filter out items with None physical_index before post_processings
+    # Filter out items with None physical_index before post-processing
     valid_toc_items = [item for item in toc_with_page_number if item.get('physical_index') is not None]
     
     toc_tree = post_processing(valid_toc_items, len(page_list))
@@ -1065,7 +1190,7 @@ def page_index_main(doc, opt=None):
     if not is_valid_pdf:
         raise ValueError("Unsupported input type. Expected a PDF file path or BytesIO object.")
 
-    print('Parsing PDF...')
+    logger.info('Parsing PDF...') if logger else print('Parsing PDF...')
     page_list = get_page_tokens(doc)
 
     logger.info({'total_page_number': len(page_list)})

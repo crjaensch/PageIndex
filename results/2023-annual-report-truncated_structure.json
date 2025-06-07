@@ -1,0 +1,77 @@
+{
+  "doc_name": "2023-annual-report-truncated.pdf",
+  "structure": [
+    {
+      "title": "Preface",
+      "start_index": 1,
+      "end_index": 4,
+      "node_id": "0000"
+    },
+    {
+      "title": "About the F ederal Reser ve",
+      "start_index": 5,
+      "end_index": 6,
+      "node_id": "0001"
+    },
+    {
+      "title": "Overview",
+      "start_index": 7,
+      "end_index": 8,
+      "node_id": "0002"
+    },
+    {
+      "title": "Monetar y Policy and Economic De velopments",
+      "start_index": 9,
+      "end_index": 9,
+      "node_id": "0003"
+    },
+    {
+      "title": "March 2024 Summar y",
+      "start_index": 9,
+      "end_index": 14,
+      "node_id": "0004"
+    },
+    {
+      "title": "June 2023 Summar y",
+      "start_index": 15,
+      "end_index": 20,
+      "node_id": "0005"
+    },
+    {
+      "title": "Financial Stability",
+      "start_index": 21,
+      "end_index": 21,
+      "node_id": "0006"
+    },
+    {
+      "title": "Monitoring F inancial V ulnerabilities",
+      "start_index": 22,
+      "end_index": 28,
+      "node_id": "0007"
+    },
+    {
+      "title": "Domestic and Inter national Cooperation and Coordination",
+      "start_index": 28,
+      "end_index": 30,
+      "node_id": "0008"
+    },
+    {
+      "title": "Super vision and Regulation",
+      "start_index": 31,
+      "end_index": 31,
+      "node_id": "0009"
+    },
+    {
+      "title": "Super vised and Regulated Institutions",
+      "start_index": 32,
+      "end_index": 35,
+      "node_id": "0010"
+    },
+    {
+      "title": "Super visory Developments",
+      "start_index": 35,
+      "end_index": 50,
+      "node_id": "0011"
+    }
+  ]
+}
