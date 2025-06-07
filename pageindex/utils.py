@@ -21,7 +21,12 @@ CHATGPT_API_KEY = os.getenv("CHATGPT_API_KEY")
 
 
 def count_tokens(text, model):
-    enc = tiktoken.encoding_for_model(model)
+    try:
+        # First try to get the encoding for the specified model
+        enc = tiktoken.encoding_for_model(model)
+    except KeyError:
+        # If model not found, use a default encoding (cl100k_base is used by gpt-4 and gpt-3.5-turbo)
+        enc = tiktoken.get_encoding("cl100k_base")
     tokens = enc.encode(text)
     return len(tokens)
 
