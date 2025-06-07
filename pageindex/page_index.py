@@ -4,9 +4,11 @@ import json
 import copy
 import random
 import re
-from .utils import run_specific_agent, extract_json, count_tokens, write_node_id, JsonLogger, add_preface_if_needed, get_page_tokens, post_processing, convert_physical_index_to_int, add_node_text, get_pdf_name, convert_page_to_int, structure_to_list
+import asyncio
+from io import BytesIO  # Add BytesIO import to fix the NameError
+
 from agents import Agent
-import asyncio # Ensure asyncio is imported if not already explicitly
+from .utils import run_specific_agent, extract_json, count_tokens, write_node_id, JsonLogger, add_preface_if_needed, get_page_tokens, post_processing, convert_physical_index_to_int, add_node_text, get_pdf_name, convert_page_to_int, generate_summaries_for_structure, generate_doc_description, remove_structure_text, ConfigLoader
 
 # --- Agent Definitions ---
 DEFAULT_AGENT_MODEL = "gpt-4.1-mini" # Or your preferred model, e.g., from config
@@ -14,7 +16,7 @@ DEFAULT_AGENT_MODEL = "gpt-4.1-mini" # Or your preferred model, e.g., from confi
 CHECK_TITLE_APPEARANCE_AGENT = Agent(
     name="TitleAppearanceCheckerAgent",
     instructions="Your job is to check if a given section title appears or starts in the given page_text. Use fuzzy matching and ignore space inconsistencies. You must reply in the specified JSON format: {\"thinking\": \"<your reasoning>\", \"answer\": \"yes or no\"}. Directly return the final JSON structure. Do not output anything else.",
-    model=DEFAULT_AGENT_MODEL 
+    model=DEFAULT_AGENT_MODEL
 )
 
 CHECK_TITLE_START_AGENT = Agent(
@@ -183,11 +185,11 @@ Directly return the final JSON structure. Do not output anything else.
 
 
 ################### check title in page #########################################################
-async def check_title_appearance(item, page_list, start_index=1): # model parameter removed
+async def check_title_appearance(item, page_list, start_index=1, model=None):
     title = item['title']
     if 'physical_index' not in item or item['physical_index'] is None:
         return {'list_index': item.get('list_index'), 'answer': 'no', 'title': title, 'page_number': None}
-    
+
     page_number = item['physical_index']
     page_text = page_list[page_number - start_index][0]
 
@@ -201,18 +203,19 @@ async def check_title_appearance(item, page_list, start_index=1): # model parame
     Remember to reply in the JSON format as specified in your instructions.
     """ # The JSON structure is now part of the agent's instructions
 
-    raw_response = await run_specific_agent(CHECK_TITLE_APPEARANCE_AGENT, user_prompt_content)
+    # Pass model_override parameter to allow using a more powerful model when needed
+    raw_response = await run_specific_agent(CHECK_TITLE_APPEARANCE_AGENT, user_prompt_content, model_override=model)
     response_json = extract_json(raw_response)
 
     answer = 'no' # Default answer
     if isinstance(response_json, dict) and 'answer' in response_json:
         answer = response_json['answer']
-    # Consider logging if raw_response indicates an error from run_specific_agent
+    # Consider logging if raw_response indicates an error from run_specific_agen
     elif "Error: Agent execution failed" in str(raw_response):
         # Optionally log the error from raw_response if needed, e.g., using a logger object if available
         # print(f"Agent execution failed for title '{title}': {raw_response}") # Or use proper logging
         pass # Defaults to 'no'
-        
+
     return {'list_index': item['list_index'], 'answer': answer, 'title': title, 'page_number': page_number}
 
 
@@ -234,19 +237,19 @@ async def check_title_appearance_in_start(title, page_text, logger=None): # mode
         # Log the structured JSON or raw response based on preference
         logger.info(f"Agent response for title '{title}' start check: {response_json if isinstance(response_json, dict) else raw_response}")
 
-    start_begin = 'no' # Default
+    start_begin = 'no' # Defaul
     if isinstance(response_json, dict) and 'start_begin' in response_json:
         start_begin = response_json['start_begin']
     elif "Error: Agent execution failed" in str(raw_response) and logger:
         logger.error(f"Agent execution failed for title '{title}' start check: {raw_response}")
-        
+
     return start_begin
 
 
 async def check_title_appearance_in_start_concurrent(structure, page_list, logger=None):
     if logger:
         logger.info("Checking title appearance in start concurrently")
-    
+
     # skip items without physical_index
     for item in structure:
         if item.get('physical_index') is None:
@@ -273,7 +276,7 @@ async def check_title_appearance_in_start_concurrent(structure, page_list, logge
     return structure
 
 
-async def toc_detector_single_page(content): # Changed to async, model parameter removed
+async def toc_detector_single_page(content, model=None):
     user_prompt_content = f"""
     Given text:
     ---
@@ -282,17 +285,18 @@ async def toc_detector_single_page(content): # Changed to async, model parameter
     Please detect if a table of contents is present and reply in the JSON format as specified in your instructions.
     """
 
-    raw_response = await run_specific_agent(TOC_DETECTOR_AGENT, user_prompt_content)
+    # Pass model_override parameter to allow using a more powerful model when needed
+    raw_response = await run_specific_agent(TOC_DETECTOR_AGENT, user_prompt_content, model_override=model)
     json_content = extract_json(raw_response)
-    
-    toc_detected = 'no' # Default
+
+    toc_detected = 'no' # Defaul
     if isinstance(json_content, dict) and 'toc_detected' in json_content:
         toc_detected = json_content['toc_detected']
     elif "Error: Agent execution failed" in str(raw_response):
         # Handle or log error, e.g.
         # print(f"Agent execution failed for toc_detector_single_page: {raw_response}")
         pass # Defaults to 'no'
-        
+
     return toc_detected
 
 
@@ -311,15 +315,15 @@ async def check_if_toc_extraction_is_complete(content, toc): # Changed to async,
 
     raw_response = await run_specific_agent(TOC_EXTRACTION_COMPLETE_AGENT, user_prompt_content)
     json_content = extract_json(raw_response)
-    
-    is_complete = 'no' # Default
+
+    is_complete = 'no' # Defaul
     if isinstance(json_content, dict) and 'complete' in json_content:
         is_complete = json_content['complete']
     elif "Error: Agent execution failed" in str(raw_response):
         # Optionally log the error
         # print(f"Agent execution failed for check_if_toc_extraction_is_complete: {raw_response}")
         pass # Defaults to 'no'
-        
+
     return is_complete
 
 
@@ -339,20 +343,20 @@ Please reply in the JSON format specified in your instructions for TOC_TRANSFORM
     raw_response = await run_specific_agent(TOC_TRANSFORMATION_COMPLETE_AGENT, user_prompt_content)
     json_content = extract_json(raw_response)
 
-    completed_status = 'no' # Default
+    completed_status = 'no' # Defaul
     if isinstance(json_content, dict) and 'completed' in json_content:
         completed_status = json_content['completed']
     elif "Error: Agent execution failed" in str(raw_response):
         if logger:
             logger.error(f"Agent execution failed for check_if_toc_transformation_is_complete: {raw_response}")
         # Defaulting to 'no' as a safe measure
-    
+
     if logger:
         logger.info(f"check_if_toc_transformation_is_complete response: {json_content if isinstance(json_content, dict) else raw_response}, status: {completed_status}")
-        
+
     return completed_status
 
-async def extract_toc_content(content): # Changed to async, model removed, iterative loop removed
+async def extract_toc_content(content, model=None):
     user_prompt_content = f"""
     Please extract the full table of contents from the following text:
     ---
@@ -363,15 +367,16 @@ async def extract_toc_content(content): # Changed to async, model removed, itera
 
     # The agent is expected to return the ToC text directly.
     # run_specific_agent returns the 'final_output' from the agent.
-    toc_text = await run_specific_agent(EXTRACT_TOC_AGENT, user_prompt_content)
-    
+    # Pass model_override parameter to allow using a more powerful model for this complex task
+    toc_text = await run_specific_agent(EXTRACT_TOC_AGENT, user_prompt_content, model_override=model)
+
     # Check if the agent call itself failed (e.g. API key issue, agent SDK error)
     if "Error: Agent execution failed" in str(toc_text):
         # Handle or log error, perhaps return an empty string or raise an exception
         # print(f"Agent execution failed for extract_toc_content: {toc_text}")
         # Consider using logger if available: logger.error(f"Agent execution failed for extract_toc_content: {toc_text}")
         return "" # Or raise an exception based on desired error handling
-        
+
     return toc_text
 
 async def detect_page_index(toc_content, logger=None): # model param removed, made async
@@ -394,7 +399,7 @@ Please reply in the JSON format specified in your instructions for PAGE_INDEX_DE
         if logger:
             logger.error(f"Agent execution failed for detect_page_index: {raw_response}")
         # Defaulting to 'no' as a safe measure
-        
+
     if logger:
         logger.info(f"detect_page_index response: {json_content if isinstance(json_content, dict) else raw_response}, page_index_given: {page_index_given}")
 
@@ -407,21 +412,21 @@ async def toc_extractor(page_list, toc_page_list, logger=None): # Made async, mo
         # Handle dots separated by spaces, e.g., ". . . . ."
         text = re.sub(r'(?:\. ){4,}\.', ': ', text) # Matches '. . . . .' (at least 5 dots with 4 spaces)
         return text
-    
+
     toc_content_parts = []
-    for page_index in toc_page_list:
-        # Ensure page_index is within bounds of page_list
-        if 0 <= page_index < len(page_list):
-            toc_content_parts.append(page_list[page_index][0])
+    for page_idx in toc_page_list:
+        # Ensure page_idx is within bounds of page_list
+        if 0 <= page_idx < len(page_list):
+            toc_content_parts.append(page_list[page_idx][0])
         elif logger:
-            logger.warning(f"toc_extractor: page_index {page_index} out of bounds for page_list (len {len(page_list)}). Skipping.")
-    
+            logger.warning(f"toc_extractor: page_idx {page_idx} out of bounds for page_list (len {len(page_list)}). Skipping.")
+
     toc_content = "".join(toc_content_parts)
     toc_content = transform_dots_to_colon(toc_content)
-    
+
     # Pass logger to detect_page_index
-    has_page_index = await detect_page_index(toc_content, logger=logger) 
-    
+    has_page_index = await detect_page_index(toc_content, logger=logger)
+
     if logger:
         logger.info(f"toc_extractor result: page_index_given_in_toc='{has_page_index}'")
 
@@ -453,16 +458,16 @@ async def toc_index_extractor(toc, content): # Made async, model removed, uses A
     json_result = extract_json(raw_response)
 
     if not isinstance(json_result, list):
-        # Fallback or error handling if agent doesn't return a list
+        # Fallback or error handling if agent doesn't return a lis
         # print(f"toc_index_extractor: Agent returned malformed JSON or not a list. Raw: {raw_response}")
-        # Consider using a logger and returning the original toc or an empty list
+        # Consider using a logger and returning the original toc or an empty lis
         return toc # Or [] or raise Exception("Agent failed to return valid JSON list for toc_index_extractor")
 
     return json_result
 
 
 
-async def toc_transformer(toc_content): # Changed to async, model & loop removed
+async def toc_transformer(toc_content, model=None):
     print('start toc_transformer')
     user_prompt_content = f"""
     Please transform the following table of contents text into the JSON structure specified in your instructions.
@@ -472,8 +477,9 @@ async def toc_transformer(toc_content): # Changed to async, model & loop removed
     ---
     """
 
-    raw_response = await run_specific_agent(TOC_JSON_TRANSFORMER_AGENT, user_prompt_content)
-    
+    # Pass model_override parameter to allow using a more powerful model for this complex JSON transformation task
+    raw_response = await run_specific_agent(TOC_JSON_TRANSFORMER_AGENT, user_prompt_content, model_override=model)
+
     transformed_json = extract_json(raw_response) # extract_json should handle potential markdown/text around JSON
 
     if not isinstance(transformed_json, dict) or 'table_of_contents' not in transformed_json:
@@ -481,28 +487,29 @@ async def toc_transformer(toc_content): # Changed to async, model & loop removed
         # For now, returning empty list to somewhat match original error paths
         # print(f"toc_transformer: Agent failed or returned malformed JSON. Raw: {raw_response}")
         # Consider using a logger if available: logger.error(f"toc_transformer: Agent failed or returned malformed JSON. Raw: {raw_response}")
-        return [] 
-    
-    # convert_page_to_int is assumed to be synchronous and operate on the list
+        return []
+
+    # convert_page_to_int is assumed to be synchronous and operate on the lis
     cleaned_toc_list = convert_page_to_int(transformed_json['table_of_contents'])
-    
+
     return cleaned_toc_list
-    
 
 
-
-async def find_toc_pages(start_page_index, page_list, opt, logger=None): # Changed to async
+async def find_toc_pages(start_page_index, page_list, opt, logger=None, model=None):
     print('start find_toc_pages')
     last_page_is_yes = False
     toc_page_list = []
     i = start_page_index
-    
+
+    # Use the model from opt if provided and no specific model override is given
+    effective_model = model if model is not None else getattr(opt, 'model', None)
+
     while i < len(page_list):
         # Only check beyond max_pages if we're still finding TOC pages
         if i >= opt.toc_check_page_num and not last_page_is_yes:
             break
-        # Call the now async toc_detector_single_page
-        detected_result = await toc_detector_single_page(page_list[i][0]) # model=opt.model removed
+        # Call the now async toc_detector_single_page with model parameter
+        detected_result = await toc_detector_single_page(page_list[i][0], model=effective_model)
         if detected_result == 'yes':
             if logger:
                 logger.info(f'Page {i} has toc')
@@ -513,15 +520,16 @@ async def find_toc_pages(start_page_index, page_list, opt, logger=None): # Chang
                 logger.info(f'Found the last page with toc: {i-1}')
             break
         i += 1
-    
+
     if not toc_page_list and logger:
         logger.info('No toc found')
-        
+
     return toc_page_list
+
 
 def remove_page_number(data):
     if isinstance(data, dict):
-        data.pop('page_number', None)  
+        data.pop('page_number', None)
         for key in list(data.keys()):
             if 'nodes' in key:
                 remove_page_number(data[key])
@@ -529,6 +537,7 @@ def remove_page_number(data):
         for item in data:
             remove_page_number(item)
     return data
+
 
 def extract_matching_page_pairs(toc_page, toc_physical_index, start_page_index):
     pairs = []
@@ -555,16 +564,16 @@ def calculate_page_offset(pairs):
             differences.append(difference)
         except (KeyError, TypeError):
             continue
-    
+
     if not differences:
         return None
-    
+
     difference_counts = {}
     for diff in differences:
         difference_counts[diff] = difference_counts.get(diff, 0) + 1
-    
+
     most_common = max(difference_counts.items(), key=lambda x: x[1])[0]
-    
+
     return most_common
 
 def add_page_offset_to_toc_json(data, offset):
@@ -572,26 +581,25 @@ def add_page_offset_to_toc_json(data, offset):
         if data[i].get('page') is not None and isinstance(data[i]['page'], int):
             data[i]['physical_index'] = data[i]['page'] + offset
             del data[i]['page']
-    
+
     return data
 
 
-
-def page_list_to_group_text(page_contents, token_lengths, max_tokens=20000, overlap_page=1):    
+def page_list_to_group_text(page_contents, token_lengths, max_tokens=20000, overlap_page=1):
     num_tokens = sum(token_lengths)
-    
+
     if num_tokens <= max_tokens:
-        # merge all pages into one text
+        # merge all pages into one tex
         page_text = "".join(page_contents)
         return [page_text]
-    
+
     subsets = []
     current_subset = []
     current_token_count = 0
 
     expected_parts_num = math.ceil(num_tokens / max_tokens)
     average_tokens_per_part = math.ceil(((num_tokens / expected_parts_num) + max_tokens) / 2)
-    
+
     for i, (page_content, page_tokens) in enumerate(zip(page_contents, token_lengths)):
         if current_token_count + page_tokens > average_tokens_per_part:
 
@@ -600,7 +608,7 @@ def page_list_to_group_text(page_contents, token_lengths, max_tokens=20000, over
             overlap_start = max(i - overlap_page, 0)
             current_subset = page_contents[overlap_start:i]
             current_token_count = sum(token_lengths[overlap_start:i])
-        
+
         # Add current page to the subset
         current_subset.append(page_content)
         current_token_count += page_tokens
@@ -608,12 +616,12 @@ def page_list_to_group_text(page_contents, token_lengths, max_tokens=20000, over
     # Add the last subset if it contains any pages
     if current_subset:
         subsets.append(''.join(current_subset))
-    
+
     print('divide page_list to groups', len(subsets))
     return subsets
 
 async def add_page_number_to_toc(part, structure): # Changed to async, model removed
-    # Convert structure (Python list of dicts) to JSON string for the agent prompt
+    # Convert structure (Python list of dicts) to JSON string for the agent promp
     structure_json_string = json.dumps(structure, indent=2)
 
     user_prompt_content = f"""
@@ -629,7 +637,7 @@ async def add_page_number_to_toc(part, structure): # Changed to async, model rem
     """
 
     raw_response = await run_specific_agent(ADD_PAGE_NUMBER_AGENT, user_prompt_content)
-    
+
     json_result = extract_json(raw_response)
 
     if not isinstance(json_result, list):
@@ -638,7 +646,7 @@ async def add_page_number_to_toc(part, structure): # Changed to async, model rem
         # Consider using a logger if available
         # Fallback to returning the original structure or an empty list, or raise an error
         return structure # Or [] or raise Exception("Agent failed to return valid JSON list for add_page_number_to_toc")
-        
+
     # The agent should directly return the desired structure, so no need to delete 'start' fields.
     return json_result
 
@@ -654,7 +662,9 @@ def remove_first_physical_index_section(text):
         # Remove the first matched section
         return text.replace(match.group(0), '', 1)
     return text
-async def process_no_toc(page_list, start_index=1, logger=None): # model param removed, made async
+
+
+async def process_no_toc(page_list, start_index=1, logger=None, model=None):
     page_contents=[]
     token_lengths=[]
     # Determine model for count_tokens, perhaps from DEFAULT_AGENT_MODEL or a config
@@ -662,11 +672,11 @@ async def process_no_toc(page_list, start_index=1, logger=None): # model param r
     # This might need adjustment if count_tokens strictly requires a model string.
     token_model_for_counting = DEFAULT_AGENT_MODEL # Or some other appropriate model string
 
-    for page_index in range(start_index, start_index+len(page_list)):
-        page_text = f"<physical_index_{page_index}>\n{page_list[page_index-start_index][0]}\n<physical_index_{page_index}>\n\n"
+    for page_idx in range(start_index, start_index+len(page_list)):
+        page_text = f"<physical_index_{page_idx}>\n{page_list[page_idx-start_index][0]}\n<physical_index_{page_idx}>\n\n"
         page_contents.append(page_text)
         token_lengths.append(count_tokens(page_text, token_model_for_counting)) # Pass a model for token counting
-    
+
     group_texts = page_list_to_group_text(page_contents, token_lengths)
     if logger:
         logger.info(f'process_no_toc: len(group_texts): {len(group_texts)}')
@@ -681,11 +691,12 @@ async def process_no_toc(page_list, start_index=1, logger=None): # model param r
         Please generate table of contents items from this text chunk according to your instructions.
         If this is not the first chunk (i.e., chunk number > 1), assume it might be a continuation of a ToC from previous chunk(s) when determining structure numbers.
         """
-        
+
         # print(f"Calling CREATE_TOC_FROM_CONTENT_AGENT for chunk {i+1}") # For debugging
-        raw_response = await run_specific_agent(CREATE_TOC_FROM_CONTENT_AGENT, user_prompt_content)
+        # Pass model_override parameter to allow using a more powerful model for this complex task
+        raw_response = await run_specific_agent(CREATE_TOC_FROM_CONTENT_AGENT, user_prompt_content, model_override=model)
         chunk_toc_items = extract_json(raw_response)
-        
+
         if isinstance(chunk_toc_items, list):
             full_toc_from_agent.extend(chunk_toc_items)
         else:
@@ -704,16 +715,17 @@ async def process_no_toc(page_list, start_index=1, logger=None): # model param r
 
     return toc_with_page_number_int
 
+
 async def process_toc_no_page_numbers(toc_content, toc_page_list, page_list,  start_index=1, logger=None): # Made async, model param removed
     page_contents=[]
     token_lengths=[]
     toc_content = await toc_transformer(toc_content) # Now async, model param removed
     logger.info(f'toc_transformer: {toc_content}')
-    for page_index in range(start_index, start_index+len(page_list)):
-        page_text = f"<physical_index_{page_index}>\n{page_list[page_index-start_index][0]}\n<physical_index_{page_index}>\n\n"
+    for page_idx in range(start_index, start_index+len(page_list)):
+        page_text = f"<physical_index_{page_idx}>\n{page_list[page_idx-start_index][0]}\n<physical_index_{page_idx}>\n\n"
         page_contents.append(page_text)
         token_lengths.append(count_tokens(page_text, DEFAULT_AGENT_MODEL)) # Use default agent model for token counting
-    
+
     group_texts = page_list_to_group_text(page_contents, token_lengths)
     logger.info(f'len(group_texts): {len(group_texts)}')
 
@@ -734,11 +746,11 @@ async def process_toc_with_page_numbers(toc_content, toc_page_list, page_list, t
     logger.info(f'toc_with_page_number: {toc_with_page_number}')
 
     toc_no_page_number = remove_page_number(copy.deepcopy(toc_with_page_number))
-    
+
     start_page_index = toc_page_list[-1] + 1
     main_content = ""
-    for page_index in range(start_page_index, min(start_page_index + toc_check_page_num, len(page_list))):
-        main_content += f"<physical_index_{page_index+1}>\n{page_list[page_index][0]}\n<physical_index_{page_index+1}>\n\n"
+    for page_idx in range(start_page_index, min(start_page_index + toc_check_page_num, len(page_list))):
+        main_content += f"<physical_index_{page_idx+1}>\n{page_list[page_idx][0]}\n<physical_index_{page_idx+1}>\n\n"
 
     toc_with_physical_index = await toc_index_extractor(toc_no_page_number, main_content) # Now async, model param removed
     logger.info(f'toc_with_physical_index: {toc_with_physical_index}')
@@ -773,7 +785,7 @@ async def process_none_page_numbers(toc_items, page_list, start_index=1): # Made
                 if toc_items[j].get('physical_index') is not None:
                     prev_physical_index = toc_items[j]['physical_index']
                     break
-            
+
             # Find next physical_index
             next_physical_index = -1  # Default if no next item exists
             for j in range(i + 1, len(toc_items)):
@@ -782,11 +794,11 @@ async def process_none_page_numbers(toc_items, page_list, start_index=1): # Made
                     break
 
             page_contents = []
-            for page_index in range(prev_physical_index, next_physical_index+1):
+            for page_idx in range(prev_physical_index, next_physical_index+1):
                 # Add bounds checking to prevent IndexError
-                list_index = page_index - start_index
-                if list_index >= 0 and list_index < len(page_list):
-                    page_text = f"<physical_index_{page_index}>\n{page_list[list_index][0]}\n<physical_index_{page_index}>\n\n"
+                list_index = page_idx - start_index
+                if 0 <= list_index < len(page_list):
+                    page_text = f"<physical_index_{page_idx}>\n{page_list[list_index][0]}\n<physical_index_{page_idx}>\n\n"
                     page_contents.append(page_text)
                 else:
                     continue
@@ -797,53 +809,68 @@ async def process_none_page_numbers(toc_items, page_list, start_index=1): # Made
             if isinstance(result[0]['physical_index'], str) and result[0]['physical_index'].startswith('<physical_index'):
                 item['physical_index'] = int(result[0]['physical_index'].split('_')[-1].rstrip('>').strip())
                 item.pop('page', None)
-    
+
     return toc_items
 
 
 async def check_toc(page_list, opt=None, logger=None):
     toc_page_list = await find_toc_pages(start_page_index=0, page_list=page_list, opt=opt)
     if len(toc_page_list) == 0:
-        logger.info('no toc found') if logger else print('no toc found')
-        return {'toc_content': None, 'toc_page_list': [], 'page_index_given_in_toc': 'no'}
+        if logger:
+            logger.info('no toc found')
+        else:
+            print('no toc found')
+        return await process_no_toc(page_list, start_index=1, logger=logger) # Now async, model param removed
     else:
-        logger.info('toc found') if logger else print('toc found')
+        if logger:
+            logger.info('toc found')
+        else:
+            print('toc found')
+
         toc_json = await toc_extractor(page_list, toc_page_list, logger=logger)
 
         if toc_json['page_index_given_in_toc'] == 'yes':
-            logger.info('index found') if logger else print('index found')
+            if logger:
+                logger.info('index found')
+            else:
+                print('index found')
             return {'toc_content': toc_json['toc_content'], 'toc_page_list': toc_page_list, 'page_index_given_in_toc': 'yes'}
-        else:
-            current_start_index = toc_page_list[-1] + 1
-            
-            while (toc_json['page_index_given_in_toc'] == 'no' and 
-                   current_start_index < len(page_list) and 
-                   current_start_index < opt.toc_check_page_num):
-                
-                additional_toc_pages = await find_toc_pages(
-                    start_page_index=current_start_index,
-                    page_list=page_list,
-                    opt=opt
-                )
-                
-                if len(additional_toc_pages) == 0:
-                    break
+        
+        current_start_index = toc_page_list[-1] + 1
+        
+        # Loop to find additional TOC pages with page numbers
+        while (current_start_index < len(page_list) and 
+               current_start_index < opt.toc_check_page_num):
+               
+            additional_toc_pages = await find_toc_pages(
+                start_page_index=current_start_index,
+                page_list=page_list,
+                opt=opt
+            )
 
-                additional_toc_json = await toc_extractor(page_list, additional_toc_pages, logger=logger)
-                if additional_toc_json['page_index_given_in_toc'] == 'yes':
-                    logger.info('index found') if logger else print('index found')
-                    return {'toc_content': additional_toc_json['toc_content'], 'toc_page_list': additional_toc_pages, 'page_index_given_in_toc': 'yes'}
+            if len(additional_toc_pages) == 0:
+                break
 
+            additional_toc_json = await toc_extractor(page_list, additional_toc_pages, logger=logger)
+            if additional_toc_json['page_index_given_in_toc'] == 'yes':
+                if logger:
+                    logger.info('index found')
                 else:
-                    current_start_index = additional_toc_pages[-1] + 1
-            logger.info('index not found') if logger else print('index not found')
-            return {'toc_content': toc_json['toc_content'], 'toc_page_list': toc_page_list, 'page_index_given_in_toc': 'no'}
+                    print('index found')
+                return {'toc_content': additional_toc_json['toc_content'], 'toc_page_list': additional_toc_pages, 'page_index_given_in_toc': 'yes'}
 
+            current_start_index = additional_toc_pages[-1] + 1
+    
+        if logger:
+            logger.info('index not found')
+        else:
+            print('index not found')
+        return {'toc_content': toc_json['toc_content'], 'toc_page_list': toc_page_list, 'page_index_given_in_toc': 'no'}
 
 
 
 ################### fix incorrect toc #########################################################
-async def single_toc_item_index_fixer(section_title, content): # Made async, model param removed
+async def single_toc_item_index_fixer(section_title, content, logger=None): # Made async, model param removed
     user_prompt_content = f"""
 Section Title:
 ---
@@ -862,7 +889,7 @@ Please find the physical_index for the section title in the provided text, adher
         physical_index_str = json_content['physical_index']
         if physical_index_str: # Check if it's not None or empty
             return convert_physical_index_to_int(physical_index_str)
-    
+
     # Fallback if physical_index is not found, is None, or JSON is malformed
     # Depending on desired behavior, you might return None, raise an error, or return a specific value.
     # Returning None or a value that signifies "not found" is often safest.
@@ -875,16 +902,19 @@ Please find the physical_index for the section title in the provided text, adher
 
 
 async def fix_incorrect_toc(toc_with_page_number, page_list, incorrect_results, start_index=1, logger=None):
-    logger.info(f'start fix_incorrect_toc with {len(incorrect_results)} incorrect results') if logger else print(f'start fix_incorrect_toc with {len(incorrect_results)} incorrect results')
+    if logger:
+        logger.info(f'start fix_incorrect_toc with {len(incorrect_results)} incorrect results')
+    else:
+        print(f'start fix_incorrect_toc with {len(incorrect_results)} incorrect results')
     incorrect_indices = {result['list_index'] for result in incorrect_results}
-    
+
     end_index = len(page_list) + start_index - 1
-    
+
     incorrect_results_and_range_logs = []
     # Helper function to process and check a single incorrect item
     async def process_and_check_item(incorrect_item):
         list_index = incorrect_item['list_index']
-        
+
         # Check if list_index is valid
         if list_index < 0 or list_index >= len(toc_with_page_number):
             # Return an invalid result for out-of-bounds indices
@@ -894,11 +924,11 @@ async def fix_incorrect_toc(toc_with_page_number, page_list, incorrect_results, 
                 'physical_index': incorrect_item.get('physical_index'),
                 'is_valid': False
             }
-        
+
         # Find the previous correct item
         prev_correct = None
         for i in range(list_index-1, -1, -1):
-            if i not in incorrect_indices and i >= 0 and i < len(toc_with_page_number):
+            if i not in incorrect_indices and 0 <= i < len(toc_with_page_number):
                 physical_index = toc_with_page_number[i].get('physical_index')
                 if physical_index is not None:
                     prev_correct = physical_index
@@ -906,11 +936,11 @@ async def fix_incorrect_toc(toc_with_page_number, page_list, incorrect_results, 
         # If no previous correct item found, use start_index
         if prev_correct is None:
             prev_correct = start_index - 1
-        
+
         # Find the next correct item
         next_correct = None
         for i in range(list_index+1, len(toc_with_page_number)):
-            if i not in incorrect_indices and i >= 0 and i < len(toc_with_page_number):
+            if i not in incorrect_indices and 0 <= i < len(toc_with_page_number):
                 physical_index = toc_with_page_number[i].get('physical_index')
                 if physical_index is not None:
                     next_correct = physical_index
@@ -918,7 +948,7 @@ async def fix_incorrect_toc(toc_with_page_number, page_list, incorrect_results, 
         # If no next correct item found, use end_index
         if next_correct is None:
             next_correct = end_index
-        
+
         incorrect_results_and_range_logs.append({
             'list_index': list_index,
             'title': incorrect_item['title'],
@@ -930,15 +960,15 @@ async def fix_incorrect_toc(toc_with_page_number, page_list, incorrect_results, 
         for page_index in range(prev_correct, next_correct+1):
             # Add bounds checking to prevent IndexError
             list_index = page_index - start_index
-            if list_index >= 0 and list_index < len(page_list):
+            if 0 <= list_index < len(page_list):
                 page_text = f"<physical_index_{page_index}>\n{page_list[list_index][0]}\n<physical_index_{page_index}>\n\n"
                 page_contents.append(page_text)
             else:
                 continue
         content_range = ''.join(page_contents)
-        
+
         physical_index_int = await single_toc_item_index_fixer(incorrect_item['title'], content_range)
-        
+
         # Check if the result is correct
         check_item = incorrect_item.copy()
         check_item['physical_index'] = physical_index_int
@@ -959,7 +989,10 @@ async def fix_incorrect_toc(toc_with_page_number, page_list, incorrect_results, 
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for item, result in zip(incorrect_results, results):
         if isinstance(result, Exception):
-            logger.error(f"Processing item {item} generated an exception: {result}") if logger else print(f"Processing item {item} generated an exception: {result}")
+            if logger:
+                logger.error(f"Processing item {item} generated an exception: {result}")
+            else:
+                print(f"Processing item {item} generated an exception: {result}")
             continue
     results = [result for result in results if not isinstance(result, Exception)]
 
@@ -993,21 +1026,27 @@ async def fix_incorrect_toc(toc_with_page_number, page_list, incorrect_results, 
 
 
 async def fix_incorrect_toc_with_retries(toc_with_page_number, page_list, incorrect_results, start_index=1, max_attempts=3, logger=None):
-    logger.info('start fix_incorrect_toc_with_retries') if logger else print('start fix_incorrect_toc_with_retries')
+    if logger:
+        logger.info('start fix_incorrect_toc_with_retries')
+    else:
+        print('start fix_incorrect_toc_with_retries')
     fix_attempt = 0
     current_toc = toc_with_page_number
     current_incorrect = incorrect_results
 
     while current_incorrect:
-        logger.info(f"Fixing {len(current_incorrect)} incorrect results") if logger else print(f"Fixing {len(current_incorrect)} incorrect results")
-        
+        if logger:
+            logger.info(f"Fixing {len(current_incorrect)} incorrect results")
+        else:
+            print(f"Fixing {len(current_incorrect)} incorrect results")
+
         current_toc, current_incorrect = await fix_incorrect_toc(current_toc, page_list, current_incorrect, start_index, logger)
-                
+
         fix_attempt += 1
         if fix_attempt >= max_attempts:
             logger.info("Maximum fix attempts reached")
             break
-    
+
     return current_toc, current_incorrect
 
 
@@ -1015,25 +1054,34 @@ async def fix_incorrect_toc_with_retries(toc_with_page_number, page_list, incorr
 
 ################### verify toc #########################################################
 async def verify_toc(page_list, list_result, start_index=1, N=None, logger=None):
-    logger.info('start verify_toc') if logger else print('start verify_toc')
+    if logger:
+        logger.info('start verify_toc')
+    else:
+        print('start verify_toc')
     # Find the last non-None physical_index
     last_physical_index = None
     for item in reversed(list_result):
         if item.get('physical_index') is not None:
             last_physical_index = item['physical_index']
             break
-    
+
     # Early return if we don't have valid physical indices
     if last_physical_index is None or last_physical_index < len(page_list)/2:
         return 0, []
-    
+
     # Determine which items to check
     if N is None:
-        logger.info('check all items') if logger else print('check all items')
+        if logger:
+            logger.info('check all items')
+        else:
+            print('check all items')
         sample_indices = range(0, len(list_result))
     else:
         N = min(N, len(list_result))
-        logger.info(f'check {N} items') if logger else print(f'check {N} items')
+        if logger:
+            logger.info(f'check {N} items')
+        else:
+            print(f'check {N} items')
         sample_indices = random.sample(range(0, len(list_result)), N)
 
     # Prepare items with their list indices
@@ -1043,7 +1091,7 @@ async def verify_toc(page_list, list_result, start_index=1, N=None, logger=None)
         # Skip items with None physical_index (these were invalidated by validate_and_truncate_physical_indices)
         if item.get('physical_index') is not None:
             item_with_index = item.copy()
-            item_with_index['list_index'] = idx  # Add the original index in list_result
+            item_with_index['list_index'] = idx  # Add the original index in list_resul
             indexed_sample_list.append(item_with_index)
 
     # Run checks concurrently
@@ -1052,7 +1100,7 @@ async def verify_toc(page_list, list_result, start_index=1, N=None, logger=None)
         for item in indexed_sample_list
     ]
     results = await asyncio.gather(*tasks)
-    
+
     # Process results
     correct_count = 0
     incorrect_results = []
@@ -1061,11 +1109,14 @@ async def verify_toc(page_list, list_result, start_index=1, N=None, logger=None)
             correct_count += 1
         else:
             incorrect_results.append(result)
-    
+
     # Calculate accuracy
     checked_count = len(results)
     accuracy = correct_count / checked_count if checked_count > 0 else 0
-    logger.info(f"accuracy: {accuracy*100:.2f}%") if logger else print(f"accuracy: {accuracy*100:.2f}%")
+    if logger:
+        logger.info(f"accuracy: {accuracy*100:.2f}%")
+    else:
+        print(f"accuracy: {accuracy*100:.2f}%")
     return accuracy, incorrect_results
 
 
@@ -1073,28 +1124,35 @@ async def verify_toc(page_list, list_result, start_index=1, N=None, logger=None)
 
 
 ################### main process #########################################################
-async def meta_processor(page_list, mode=None, toc_content=None, toc_page_list=None, start_index=1, opt=None, logger=None):
-    logger.info(f"meta_processor mode: {mode}") if logger else print(mode)
-    logger.info(f"meta_processor start_index: {start_index}") if logger else print(f'start_index: {start_index}')
-    
+async def meta_processor(page_list, mode=None, toc_content=None, toc_page_list=None, start_index=1, opt=None, logger=None, model=None):
+    if logger:
+        logger.info(f"meta_processor mode: {mode}")
+    else:
+        print(mode)
+    if logger:
+        logger.info(f"meta_processor start_index: {start_index}")
+    else:
+        print(f'start_index: {start_index}')
+
     if mode == 'process_toc_with_page_numbers':
         toc_with_page_number = await process_toc_with_page_numbers(toc_content, toc_page_list, page_list, toc_check_page_num=opt.toc_check_page_num, logger=logger) # Now async, model param removed
     elif mode == 'process_toc_no_page_numbers':
         toc_with_page_number = await process_toc_no_page_numbers(toc_content, toc_page_list, page_list, logger=logger) # Now async, model param removed
     else:
-        toc_with_page_number = await process_no_toc(page_list, start_index=start_index, logger=logger)
-            
-    toc_with_page_number = [item for item in toc_with_page_number if item.get('physical_index') is not None] 
-    
+        # Pass model parameter to process_no_toc for agent model override
+        toc_with_page_number = await process_no_toc(page_list, start_index=start_index, logger=logger, model=model)
+
+    toc_with_page_number = [item for item in toc_with_page_number if item.get('physical_index') is not None]
+
     toc_with_page_number = validate_and_truncate_physical_indices(
-        toc_with_page_number, 
-        len(page_list), 
-        start_index=start_index, 
+        toc_with_page_number,
+        len(page_list),
+        start_index=start_index,
         logger=logger
     )
-    
+
     accuracy, incorrect_results = await verify_toc(page_list, toc_with_page_number, start_index=start_index, logger=logger)
-        
+
     logger.info({
         'mode': 'process_toc_with_page_numbers',
         'accuracy': accuracy,
@@ -1105,110 +1163,135 @@ async def meta_processor(page_list, mode=None, toc_content=None, toc_page_list=N
     if accuracy > 0.6 and len(incorrect_results) > 0:
         toc_with_page_number, incorrect_results = await fix_incorrect_toc_with_retries(toc_with_page_number, page_list, incorrect_results,start_index=start_index, max_attempts=3, logger=logger)
         return toc_with_page_number
-    else:
-        if mode == 'process_toc_with_page_numbers':
-            return await meta_processor(page_list, mode='process_toc_no_page_numbers', toc_content=toc_content, toc_page_list=toc_page_list, start_index=start_index, opt=opt, logger=logger)
-        elif mode == 'process_toc_no_page_numbers':
-            return await meta_processor(page_list, mode='process_no_toc', start_index=start_index, opt=opt, logger=logger)
-        else:
-            raise Exception('Processing failed')
-        
- 
+    
+    if mode == 'process_toc_with_page_numbers':
+        return await meta_processor(page_list, mode='process_toc_no_page_numbers', toc_content=toc_content, toc_page_list=toc_page_list, start_index=start_index, opt=opt, logger=logger)
+    
+    if mode == 'process_toc_no_page_numbers':
+        return await meta_processor(page_list, mode='process_no_toc', start_index=start_index, opt=opt, logger=logger)
+    
+    raise Exception('Processing failed')
+
+
 async def process_large_node_recursively(node, page_list, opt=None, logger=None):
     node_page_list = page_list[node['start_index']-1:node['end_index']]
     token_num = sum([page[1] for page in node_page_list])
-    
+
     if node['end_index'] - node['start_index'] > opt.max_page_num_each_node and token_num >= opt.max_token_num_each_node:
-        logger.info(f"large node: {node['title']}, start_index: {node['start_index']}, end_index: {node['end_index']}, token_num: {token_num}") if logger else print('large node:', node['title'], 'start_index:', node['start_index'], 'end_index:', node['end_index'], 'token_num:', token_num)
+        if logger:
+            logger.info(f"large node: {node['title']}, start_index: {node['start_index']}, end_index: {node['end_index']}, token_num: {token_num}")
+        else:
+            print('large node:', node['title'], 'start_index:', node['start_index'], 'end_index:', node['end_index'], 'token_num:', token_num)
 
         node_toc_tree = await meta_processor(node_page_list, mode='process_no_toc', start_index=node['start_index'], opt=opt, logger=logger)
         node_toc_tree = await check_title_appearance_in_start_concurrent(node_toc_tree, page_list, logger=logger)
-        
+
         # Filter out items with None physical_index before post_processing
         valid_node_toc_items = [item for item in node_toc_tree if item.get('physical_index') is not None]
-        
+
         if valid_node_toc_items and node['title'].strip() == valid_node_toc_items[0]['title'].strip():
             node['nodes'] = post_processing(valid_node_toc_items[1:], node['end_index'])
             node['end_index'] = valid_node_toc_items[1]['start_index'] if len(valid_node_toc_items) > 1 else node['end_index']
         else:
             node['nodes'] = post_processing(valid_node_toc_items, node['end_index'])
             node['end_index'] = valid_node_toc_items[0]['start_index'] if valid_node_toc_items else node['end_index']
-        
+
     if 'nodes' in node and node['nodes']:
         tasks = [
             process_large_node_recursively(child_node, page_list, opt, logger=logger)
             for child_node in node['nodes']
         ]
         await asyncio.gather(*tasks)
-    
+
     return node
 
-async def tree_parser(page_list, opt, doc=None, logger=None):
+async def tree_parser(page_list, opt, doc=None, logger=None, model=None):
     check_toc_result = await check_toc(page_list, opt, logger=logger)
     logger.info(check_toc_result)
 
     if check_toc_result.get("toc_content") and check_toc_result["toc_content"].strip() and check_toc_result["page_index_given_in_toc"] == "yes":
         toc_with_page_number = await meta_processor(
-            page_list, 
-            mode='process_toc_with_page_numbers', 
-            start_index=1, 
-            toc_content=check_toc_result['toc_content'], 
-            toc_page_list=check_toc_result['toc_page_list'], 
+            page_list,
+            mode='process_toc_with_page_numbers',
+            start_index=1,
+            toc_content=check_toc_result['toc_content'],
+            toc_page_list=check_toc_result['toc_page_list'],
             opt=opt,
-            logger=logger)
+            logger=logger,
+            model=model)
     else:
         toc_with_page_number = await meta_processor(
-            page_list, 
-            mode='process_no_toc', 
-            start_index=1, 
+            page_list,
+            mode='process_no_toc',
+            start_index=1,
             opt=opt,
-            logger=logger)
+            logger=logger,
+            model=model)
 
     toc_with_page_number = add_preface_if_needed(toc_with_page_number)
     toc_with_page_number = await check_title_appearance_in_start_concurrent(toc_with_page_number, page_list, logger=logger)
-    
+
     # Filter out items with None physical_index before post-processing
     valid_toc_items = [item for item in toc_with_page_number if item.get('physical_index') is not None]
-    
+
     toc_tree = post_processing(valid_toc_items, len(page_list))
     tasks = [
         process_large_node_recursively(node, page_list, opt, logger=logger)
         for node in toc_tree
     ]
     await asyncio.gather(*tasks)
-    
+
     return toc_tree
 
 
-def page_index_main(doc, opt=None):
+async def page_index_main(doc, opt=None):
     logger = JsonLogger(doc)
-    
-    is_valid_pdf = (
-        (isinstance(doc, str) and os.path.isfile(doc) and doc.lower().endswith(".pdf")) or 
-        isinstance(doc, BytesIO)
-    )
+
+    # If doc is a string, normalize the path to handle potential path issues
+    if isinstance(doc, str):
+        # Normalize path to resolve any redundant separators or relative path components
+        normalized_path = os.path.normpath(doc)
+
+        # Check if the normalized path exists and is a PDF
+        is_valid_pdf = os.path.isfile(normalized_path) and normalized_path.lower().endswith(".pdf")
+
+        # If valid after normalization, update doc to use the normalized path
+        if is_valid_pdf:
+            doc = normalized_path
+    else:
+        # For non-string inputs, check if it's a BytesIO objec
+        is_valid_pdf = isinstance(doc, BytesIO)
+
     if not is_valid_pdf:
+        # Provide more helpful error message
+        if isinstance(doc, str):
+            raise ValueError(f"PDF file not found or invalid: '{doc}'. Please check the path and ensure it's a valid PDF file.")
+        
         raise ValueError("Unsupported input type. Expected a PDF file path or BytesIO object.")
 
-    logger.info('Parsing PDF...') if logger else print('Parsing PDF...')
+    if logger:
+        logger.info('Parsing PDF...')
+    else:
+        print('Parsing PDF...')
     page_list = get_page_tokens(doc)
 
     logger.info({'total_page_number': len(page_list)})
     logger.info({'total_token': sum([page[1] for page in page_list])})
-    
-    structure = asyncio.run(tree_parser(page_list, opt, doc=doc, logger=logger))
+
+    # Pass model parameter from opt to tree_parser for agent model override
+    structure = await tree_parser(page_list, opt, doc=doc, logger=logger, model=opt.model if hasattr(opt, 'model') else None)
     if opt.if_add_node_id == 'yes':
-        write_node_id(structure)    
+        write_node_id(structure)
     if opt.if_add_node_text == 'yes':
         add_node_text(structure, page_list)
     if opt.if_add_node_summary == 'yes':
         if opt.if_add_node_text == 'no':
             add_node_text(structure, page_list)
-        asyncio.run(generate_summaries_for_structure(structure, model=opt.model))
+        await generate_summaries_for_structure(structure, model=opt.model)
         if opt.if_add_node_text == 'no':
             remove_structure_text(structure)
         if opt.if_add_doc_description == 'yes':
-            doc_description = generate_doc_description(structure, model=opt.model)
+            doc_description = await generate_doc_description(structure, model=opt.model)
             return {
                 'doc_name': get_pdf_name(doc),
                 'doc_description': doc_description,
@@ -1220,15 +1303,16 @@ def page_index_main(doc, opt=None):
     }
 
 
-def page_index(doc, model=None, toc_check_page_num=None, max_page_num_each_node=None, max_token_num_each_node=None,
-               if_add_node_id=None, if_add_node_summary=None, if_add_doc_description=None, if_add_node_text=None):
-    
+async def page_index(doc, model=None, toc_check_page_num=None, max_page_num_each_node=None,
+               max_token_num_each_node=None, if_add_node_id=None, if_add_node_summary=None,
+               if_add_doc_description=None, if_add_node_text=None):
+
     user_opt = {
         arg: value for arg, value in locals().items()
         if arg != "doc" and value is not None
     }
     opt = ConfigLoader().load(user_opt)
-    return page_index_main(doc, opt)
+    return await page_index_main(doc, opt)
 
 
 def validate_and_truncate_physical_indices(toc_with_page_number, page_list_length, start_index=1, logger=None):
@@ -1238,10 +1322,10 @@ def validate_and_truncate_physical_indices(toc_with_page_number, page_list_lengt
     """
     if not toc_with_page_number:
         return toc_with_page_number
-    
+
     max_allowed_page = page_list_length + start_index - 1
     truncated_items = []
-    
+
     for i, item in enumerate(toc_with_page_number):
         if item.get('physical_index') is not None:
             original_index = item['physical_index']
@@ -1253,12 +1337,12 @@ def validate_and_truncate_physical_indices(toc_with_page_number, page_list_lengt
                 })
                 if logger:
                     logger.info(f"Removed physical_index for '{item.get('title', 'Unknown')}' (was {original_index}, too far beyond document)")
-    
+
     if truncated_items and logger:
         logger.info(f"Total removed items: {len(truncated_items)}")
-        
+
     print(f"Document validation: {page_list_length} pages, max allowed index: {max_allowed_page}")
     if truncated_items:
         print(f"Truncated {len(truncated_items)} TOC items that exceeded document length")
-     
+
     return toc_with_page_number

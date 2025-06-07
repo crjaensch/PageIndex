@@ -1,8 +1,11 @@
 import argparse
+import asyncio
+import os
+import json
 from pageindex import *
 from pageindex.utils import ConfigLoader
 
-if __name__ == "__main__":
+async def main():
     # Set up argument parser
     parser = argparse.ArgumentParser(description='Process PDF document and generate structure')
     parser.add_argument('--pdf_path', type=str, help='Path to the PDF file')
@@ -23,7 +26,7 @@ if __name__ == "__main__":
                       help='Whether to add text to the node')
     args = parser.parse_args()
         
-        # Configure options
+    # Configure options
     config_loader = ConfigLoader()
     user_args_dict = {
         "model": args.model,
@@ -38,7 +41,7 @@ if __name__ == "__main__":
     opt = config_loader.load(user_args_dict)
 
     # Process the PDF
-    toc_with_page_number = page_index_main(args.pdf_path, opt)
+    toc_with_page_number = await page_index_main(args.pdf_path, opt)
     print('Parsing done, saving to file...')
     
     # Save results
@@ -47,3 +50,6 @@ if __name__ == "__main__":
     
     with open(f'./results/{pdf_name}_structure.json', 'w', encoding='utf-8') as f:
         json.dump(toc_with_page_number, f, indent=2)
+
+if __name__ == "__main__":
+    asyncio.run(main())

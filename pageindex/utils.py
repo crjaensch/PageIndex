@@ -9,19 +9,35 @@ import PyPDF2
 import copy
 import asyncio
 import pymupdf
+import re
 from io import BytesIO
 from dotenv import load_dotenv
-load_dotenv()
-import logging
 import yaml
 from pathlib import Path
 from types import SimpleNamespace as config
+
+load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if OPENAI_API_KEY:
     set_default_openai_api(OPENAI_API_KEY)
 else:
     logging.warning("OPENAI_API_KEY not found in environment. Agent SDK may not function.")
+
+# --- Agent Definitions ---
+DEFAULT_AGENT_MODEL = "gpt-4.1-mini"  # Or your preferred model
+
+NODE_SUMMARY_AGENT = Agent(
+    name="NodeSummaryAgent",
+    instructions="You are given a part of a document, your task is to generate a description of the partial document about what are main points covered in the partial document. Directly return the description, do not include any other text.",
+    model=DEFAULT_AGENT_MODEL
+)
+
+DOC_DESCRIPTION_AGENT = Agent(
+    name="DocDescriptionAgent",
+    instructions="You are an expert in generating descriptions for a document. Your task is to generate a one-sentence description for the document, which makes it easy to distinguish the document from other documents. Directly return the description, do not include any other text.",
+    model=DEFAULT_AGENT_MODEL
+)
 
 
 def count_tokens(text, model):
@@ -45,18 +61,21 @@ async def run_specific_agent(agent: Agent, user_prompt_content: str, model_overr
         return "Error: Agent was None."
 
     messages_input = [{"role": "user", "content": user_prompt_content}]
-    
-    try:
-        # Note: The 'model_override' parameter is not directly used with Runner.run in the example.
-        # If model needs to be overridden, the Agent instance itself might need to be created
-        # with the new model, or the SDK should provide a way to specify it during the run.
-        # For now, we assume the agent's model is set during its instantiation.
-        if model_override:
-            # This is a placeholder for potential future logic if model override is needed and supported.
-            pass
 
-        result = await Runner.run(agent, input=messages_input)
-        
+    try:
+        # If model_override is provided, create a temporary copy of the agent with the overridden model
+        if model_override:
+            # Create a copy of the agent with the overridden model
+            temp_agent = Agent(
+                name=agent.name,
+                instructions=agent.instructions,
+                model=model_override
+            )
+            result = await Runner.run(temp_agent, input=messages_input)
+        else:
+            # Use the original agent with its default model
+            result = await Runner.run(agent, input=messages_input)
+
         response_text = result.final_output
         return response_text
     except Exception as e:
@@ -65,20 +84,20 @@ async def run_specific_agent(agent: Agent, user_prompt_content: str, model_overr
         # Return a string indicating error, consistent with previous functions' error returns.
         return f"Error: Agent execution failed for {agent_name}. Details: {e}"
 
-            
+
 def get_json_content(response):
     start_idx = response.find("```json")
     if start_idx != -1:
         start_idx += 7
         response = response[start_idx:]
-        
+
     end_idx = response.rfind("```")
     if end_idx != -1:
         response = response[:end_idx]
-    
+
     json_content = response.strip()
     return json_content
-         
+
 
 def extract_json(content):
     try:
@@ -97,7 +116,7 @@ def extract_json(content):
         json_content = json_content.replace('\n', ' ').replace('\r', ' ')  # Remove newlines
         json_content = ' '.join(json_content.split())  # Normalize whitespace
 
-        # Attempt to parse and return the JSON object
+        # Attempt to parse and return the JSON objec
         return json.loads(json_content)
     except json.JSONDecodeError as e:
         logging.error(f"Failed to extract JSON: {e}")
@@ -139,7 +158,7 @@ def get_nodes(structure):
         for item in structure:
             nodes.extend(get_nodes(item))
         return nodes
-    
+
 def structure_to_list(structure):
     if isinstance(structure, dict):
         nodes = []
@@ -153,7 +172,7 @@ def structure_to_list(structure):
             nodes.extend(structure_to_list(item))
         return nodes
 
-    
+
 def get_leaf_nodes(structure):
     if isinstance(structure, dict):
         if not structure['nodes']:
@@ -204,7 +223,7 @@ def get_last_node(structure):
 
 def extract_text_from_pdf(pdf_path):
     pdf_reader = PyPDF2.PdfReader(pdf_path)
-    ###return text not list 
+    ###return text not lis
     text=""
     for page_num in range(len(pdf_reader.pages)):
         page = pdf_reader.pages[page_num]
@@ -240,7 +259,7 @@ def get_last_start_page_from_text(text):
     start_page = -1
     # Find all matches of start_index tags
     start_page_matches = re.finditer(r'<start_index_(\d+)>', text)
-    # Convert iterator to list and get the last match if any exist
+    # Convert iterator to list and get the last match if any exis
     matches_list = list(start_page_matches)
     if matches_list:
         start_page = int(matches_list[-1].group(1))
@@ -268,7 +287,7 @@ class JsonLogger:
     def __init__(self, file_path):
         # Extract PDF name for logger name
         pdf_name = get_pdf_name(file_path)
-            
+
         current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.filename = f"{pdf_name}_{current_time}.json"
         os.makedirs("./logs", exist_ok=True)
@@ -281,7 +300,7 @@ class JsonLogger:
         else:
             self.log_data.append({'message': message})
         # Add new message to the log data
-        
+
         # Write entire log data to file
         with open(self._filepath(), "w") as f:
             json.dump(self.log_data, f, indent=2)
@@ -301,7 +320,7 @@ class JsonLogger:
 
     def _filepath(self):
         return os.path.join("logs", self.filename)
-    
+
 
 
 
@@ -312,11 +331,11 @@ def list_to_tree(data):
             return None
         parts = str(structure).split('.')
         return '.'.join(parts[:-1]) if len(parts) > 1 else None
-    
+
     # First pass: Create nodes and track parent-child relationships
     nodes = {}
     root_nodes = []
-    
+
     for item in data:
         structure = item.get('structure')
         node = {
@@ -325,12 +344,12 @@ def list_to_tree(data):
             'end_index': item.get('end_index'),
             'nodes': []
         }
-        
+
         nodes[structure] = node
-        
-        # Find parent
+
+        # Find paren
         parent_structure = get_parent_structure(structure)
-        
+
         if parent_structure:
             # Add as child to parent if parent exists
             if parent_structure in nodes:
@@ -340,7 +359,7 @@ def list_to_tree(data):
         else:
             # No parent, this is a root node
             root_nodes.append(node)
-    
+
     # Helper function to clean empty children arrays
     def clean_node(node):
         if not node['nodes']:
@@ -349,7 +368,7 @@ def list_to_tree(data):
             for child in node['nodes']:
                 clean_node(child)
         return node
-    
+
     # Clean and return the tree
     return [clean_node(node) for node in root_nodes]
 
@@ -369,31 +388,45 @@ def add_preface_if_needed(data):
 
 
 def get_page_tokens(pdf_path, model="gpt-4.1", pdf_parser="PyPDF2"):
+    # Normalize path if it's a string
+    if isinstance(pdf_path, str):
+        pdf_path = os.path.normpath(pdf_path)
+
     if pdf_parser == "PyPDF2":
-        pdf_reader = PyPDF2.PdfReader(pdf_path)
-        page_list = []
-        for page_num in range(len(pdf_reader.pages)):
-            page = pdf_reader.pages[page_num]
-            page_text = page.extract_text()
-            token_length = count_tokens(page_text, model)
-            page_list.append((page_text, token_length))
-        return page_list
+        try:
+            pdf_reader = PyPDF2.PdfReader(pdf_path)
+            page_list = []
+            for page_num in range(len(pdf_reader.pages)):
+                page = pdf_reader.pages[page_num]
+                page_text = page.extract_text()
+                token_length = count_tokens(page_text, model)
+                page_list.append((page_text, token_length))
+            return page_list
+        except Exception as e:
+            raise ValueError(f"Error reading PDF with PyPDF2: {e}. Please check if '{pdf_path}' is a valid PDF file.")
     elif pdf_parser == "PyMuPDF":
-        if isinstance(pdf_path, BytesIO):
-            pdf_stream = pdf_path
-            doc = pymupdf.open(stream=pdf_stream, filetype="pdf")
-        elif isinstance(pdf_path, str) and os.path.isfile(pdf_path) and pdf_path.lower().endswith(".pdf"):
-            doc = pymupdf.open(pdf_path)
-        page_list = []
-        for page in doc:
-            page_text = page.get_text()
-            token_length = count_tokens(page_text, model)
-            page_list.append((page_text, token_length))
-        return page_list
+        try:
+            if isinstance(pdf_path, BytesIO):
+                pdf_stream = pdf_path
+                doc = pymupdf.open(stream=pdf_stream, filetype="pdf")
+            elif isinstance(pdf_path, str):
+                # No need to check isfile here as pymupdf.open will raise an appropriate error
+                doc = pymupdf.open(pdf_path)
+            else:
+                raise ValueError("Unsupported input type. Expected a PDF file path or BytesIO object.")
+
+            page_list = []
+            for page in doc:
+                page_text = page.get_text()
+                token_length = count_tokens(page_text, model)
+                page_list.append((page_text, token_length))
+            return page_list
+        except Exception as e:
+            raise ValueError(f"Error reading PDF with PyMuPDF: {e}. Please check if '{pdf_path}' is a valid PDF file.")
     else:
         raise ValueError(f"Unsupported PDF parser: {pdf_parser}")
 
-        
+
 
 def get_text_of_pdf_pages(pdf_pages, start_page, end_page):
     text = ""
@@ -415,7 +448,7 @@ def get_number_of_pages(pdf_path):
 
 
 def post_processing(structure, end_physical_index):
-    # First convert page_number to start_index in flat list
+    # First convert page_number to start_index in flat lis
     for i, item in enumerate(structure):
         item['start_index'] = item.get('physical_index')
         if i < len(structure) - 1:
@@ -429,7 +462,7 @@ def post_processing(structure, end_physical_index):
     if len(tree)!=0:
         return tree
     else:
-        ### remove appear_start 
+        ### remove appear_star
         for node in structure:
             node.pop('appear_start', None)
             node.pop('physical_index', None)
@@ -486,7 +519,7 @@ def convert_physical_index_to_int(data):
             data = int(data.split('_')[-1].rstrip('>').strip())
         elif data.startswith('physical_index_'):
             data = int(data.split('_')[-1].strip())
-        # Check data is int
+        # Check data is in
         if isinstance(data, int):
             return data
         else:
@@ -532,13 +565,11 @@ def add_node_text_with_labels(node, pdf_pages):
 
 
 async def generate_node_summary(node, model=None):
-    prompt = f"""You are given a part of a document, your task is to generate a description of the partial document about what are main points covered in the partial document.
+    # Prepare the prompt with the node tex
+    prompt = f"Partial Document Text: {node['text']}"
 
-    Partial Document Text: {node['text']}
-    
-    Directly return the description, do not include any other text.
-    """
-    response = await ChatGPT_API_async(model, prompt)
+    # Run the agent and get the response
+    response = await run_specific_agent(NODE_SUMMARY_AGENT, prompt, model_override=model)
     return response
 
 
@@ -546,21 +577,18 @@ async def generate_summaries_for_structure(structure, model=None):
     nodes = structure_to_list(structure)
     tasks = [generate_node_summary(node, model=model) for node in nodes]
     summaries = await asyncio.gather(*tasks)
-    
+
     for node, summary in zip(nodes, summaries):
         node['summary'] = summary
     return structure
 
 
-def generate_doc_description(structure, model=None):
-    prompt = f"""Your are an expert in generating descriptions for a document.
-    You are given a structure of a document. Your task is to generate a one-sentence description for the document, which makes it easy to distinguish the document from other documents.
-        
-    Document Structure: {structure}
-    
-    Directly return the description, do not include any other text.
-    """
-    response = ChatGPT_API(model, prompt)
+async def generate_doc_description(structure, model=None):
+    # Prepare the prompt with the document structure
+    prompt = f"Document Structure: {structure}"
+
+    # Run the agent and get the response
+    response = await run_specific_agent(DOC_DESCRIPTION_AGENT, prompt, model_override=model)
     return response
 
 
