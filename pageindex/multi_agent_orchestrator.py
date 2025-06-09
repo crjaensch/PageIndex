@@ -6,16 +6,46 @@ from agents import Agent
 
 # Import existing agents and utilities
 from pageindex.page_index import (
-    CHECK_TITLE_APPEARANCE_AGENT, CHECK_TITLE_START_AGENT, TOC_DETECTOR_AGENT,
-    TOC_EXTRACTION_COMPLETE_AGENT, EXTRACT_TOC_AGENT, TOC_JSON_TRANSFORMER_AGENT,
-    CREATE_TOC_FROM_CONTENT_AGENT, SINGLE_TOC_ITEM_FIXER_AGENT, 
-    TOC_TRANSFORMATION_COMPLETE_AGENT, ADD_PAGE_NUMBER_AGENT,
-    PAGE_INDEX_DETECTOR_AGENT, page_list_to_group_text
+    CHECK_TITLE_APPEARANCE_AGENT,
+    CHECK_TITLE_START_AGENT,
+    TOC_DETECTOR_AGENT,
+    TOC_EXTRACTION_COMPLETE_AGENT,
+    EXTRACT_TOC_AGENT,
+    TOC_JSON_TRANSFORMER_AGENT,
+    CREATE_TOC_FROM_CONTENT_AGENT,
+    SINGLE_TOC_ITEM_FIXER_AGENT,
+    TOC_TRANSFORMATION_COMPLETE_AGENT,
+    ADD_PAGE_NUMBER_AGENT,
+    PAGE_INDEX_DETECTOR_AGENT,
+    page_list_to_group_text,
+    meta_processor,
+    verify_toc,
+    fix_incorrect_toc_with_retries,
+    check_title_appearance_in_start_concurrent,
+    process_large_node_recursively,
+    validate_and_truncate_physical_indices,
+    detect_page_index,
 )
-from pageindex.utils import (run_specific_agent, extract_json, JsonLogger, get_pdf_name, 
-                  get_page_tokens, ConfigLoader, DEFAULT_AGENT_MODEL, count_tokens,
-                  convert_physical_index_to_int, post_processing, 
-                  NODE_SUMMARY_AGENT, DOC_DESCRIPTION_AGENT)
+from pageindex.utils import (
+    run_specific_agent,
+    extract_json,
+    JsonLogger,
+    get_pdf_name,
+    get_page_tokens,
+    ConfigLoader,
+    DEFAULT_AGENT_MODEL,
+    count_tokens,
+    convert_physical_index_to_int,
+    post_processing,
+    NODE_SUMMARY_AGENT,
+    DOC_DESCRIPTION_AGENT,
+    add_preface_if_needed,
+    write_node_id,
+    add_node_text,
+    generate_summaries_for_structure,
+    generate_doc_description,
+    remove_structure_text,
+)
 
 
 # Agent wrapper for consistent interface
@@ -576,10 +606,48 @@ Respond with JSON containing your decision:
             }
         elif not self.context.has_toc and not self.context.has_agent_result("CREATE_TOC_FROM_CONTENT"):
             return {
-                "next_agent": "CREATE_TOC_FROM_CONTENT", 
+                "next_agent": "CREATE_TOC_FROM_CONTENT",
                 "task_parameters": {"chunk_index": 0, "expected_output": "json"},
                 "reasoning": "Generate TOC from content",
                 "completion_status": "continue"
+            }
+        elif self.context.has_agent_result("EXTRACT_TOC") and not self.context.has_agent_result("TOC_JSON_TRANSFORMER"):
+            return {
+                "next_agent": "TOC_JSON_TRANSFORMER",
+                "task_parameters": {"expected_output": "json"},
+                "reasoning": "Transform extracted TOC to JSON",
+                "completion_status": "continue",
+            }
+        elif (
+            self.context.has_agent_result("CREATE_TOC_FROM_CONTENT")
+            and not self.context.has_agent_result("ADD_PAGE_NUMBER")
+        ):
+            chunk_index = self.context.processing_metadata.get("content_chunk_index", 0)
+            total_chunks = len(self.context.get_grouped_content_for_toc_generation())
+            if chunk_index < total_chunks - 1:
+                self.context.processing_metadata["content_chunk_index"] = chunk_index + 1
+                return {
+                    "next_agent": "CREATE_TOC_FROM_CONTENT",
+                    "task_parameters": {"chunk_index": chunk_index + 1, "expected_output": "json"},
+                    "reasoning": "Process next content chunk",
+                    "completion_status": "continue",
+                }
+            return {
+                "next_agent": "ADD_PAGE_NUMBER",
+                "task_parameters": {"expected_output": "json"},
+                "reasoning": "Map titles to pages after generating TOC",
+                "completion_status": "continue",
+            }
+        elif (
+            self.context.has_agent_result("ADD_PAGE_NUMBER")
+            and self.context.incorrect_items
+        ):
+            item = self.context.incorrect_items[0]
+            return {
+                "next_agent": "SINGLE_TOC_ITEM_FIXER",
+                "task_parameters": {"title": item["title"], "expected_output": "json"},
+                "reasoning": "Fix incorrect page mapping",
+                "completion_status": "continue",
             }
         else:
             return {"completion_status": "complete"}
@@ -627,25 +695,70 @@ Respond with JSON containing your decision:
         self.context.logger.info(f"Strategy adaptation: {adaptation_reason}")
     
     async def _finalize_processing(self):
-        """Finalize processing and build final structure"""
-        
-        # Build final structure from verified TOC
-        if self.context.verified_toc:
-            toc_items = self.context.verified_toc
-        elif self.context.toc_with_physical_indices:
-            toc_items = self.context.toc_with_physical_indices
+        """Finalize processing using page_index meta logic"""
+
+        page_list = self.context.page_list
+
+        if self.context.raw_toc_content:
+            # Determine if TOC contains page numbers
+            page_index_result = await detect_page_index(
+                self.context.raw_toc_content, logger=self.context.logger
+            )
+            self.context.toc_has_page_numbers = page_index_result == "yes"
+
+            mode = (
+                "process_toc_with_page_numbers"
+                if self.context.toc_has_page_numbers
+                else "process_toc_no_page_numbers"
+            )
+
+            toc_with_page_number = await meta_processor(
+                page_list,
+                mode=mode,
+                toc_content=self.context.raw_toc_content,
+                toc_page_list=self.context.toc_pages,
+                start_index=1,
+                opt=self.context.opt,
+                logger=self.context.logger,
+                model=self.context.model,
+            )
         elif self.context.structured_toc:
-            # Convert physical indices if needed
-            toc_items = convert_physical_index_to_int(self.context.structured_toc)
+            # Use generated TOC from content
+            toc_with_page_number = await meta_processor(
+                page_list,
+                mode="process_no_toc",
+                start_index=1,
+                opt=self.context.opt,
+                logger=self.context.logger,
+                model=self.context.model,
+            )
         else:
-            toc_items = []
-        
-        # Filter valid items and build structure
-        valid_items = [item for item in toc_items if item.get('physical_index') is not None]
-        
-        if valid_items:
-            self.context.final_structure = post_processing(valid_items, self.context.total_pages)
-        
+            toc_with_page_number = await meta_processor(
+                page_list,
+                mode="process_no_toc",
+                start_index=1,
+                opt=self.context.opt,
+                logger=self.context.logger,
+                model=self.context.model,
+            )
+
+        toc_with_page_number = add_preface_if_needed(toc_with_page_number)
+        toc_with_page_number = await check_title_appearance_in_start_concurrent(
+            toc_with_page_number, page_list, logger=self.context.logger
+        )
+
+        valid_items = [
+            item for item in toc_with_page_number if item.get("physical_index") is not None
+        ]
+
+        toc_tree = post_processing(valid_items, len(page_list))
+        tasks = [
+            process_large_node_recursively(node, page_list, self.context.opt, logger=self.context.logger)
+            for node in toc_tree
+        ]
+        await asyncio.gather(*tasks)
+
+        self.context.final_structure = toc_tree
         self.context.logger.info("Processing finalized")
 
 # Main function using multi-agent orchestrator
@@ -672,25 +785,37 @@ async def multi_agent_page_index(doc, opt=None, logger=None, model=None):
         
         # Generate summaries and description if requested
         if context.opt.include_node_summary == 'yes':
-            summary_agent = orchestrator.agents["NODE_SUMMARY"]
-            # Implementation for generating summaries for each node
-        
-        if context.opt.include_doc_description == 'yes':
-            description_agent = orchestrator.agents["DOC_DESCRIPTION"]
-            # Implementation for generating document description
+            if context.opt.include_node_text == 'no':
+                add_node_text(context.final_structure, context.page_list)
+            await generate_summaries_for_structure(context.final_structure, model=context.model)
+            if context.opt.include_node_text == 'no':
+                remove_structure_text(context.final_structure)
+            if context.opt.include_doc_description == 'yes':
+                context.document_description = await generate_doc_description(
+                    context.final_structure, model=context.model
+                )
+        elif context.opt.include_doc_description == 'yes':
+            context.document_description = await generate_doc_description(
+                context.final_structure, model=context.model
+            )
         
         # Return final result
-        return {
+        result = {
             'doc_name': context.doc_name,
             'structure': context.final_structure,
             'processing_metadata': {
                 'agents_used': context.processing_metadata["agents_used"],
                 'strategy_adaptations': context.processing_metadata["strategy_adaptations"],
-                'total_execution_time': sum(r["metadata"].get("execution_time", 0) 
-                                          for r in context.agent_results.values()),
-                'processing_summary': processing_summary
-            }
+                'total_execution_time': sum(
+                    r["metadata"].get("execution_time", 0)
+                    for r in context.agent_results.values()
+                ),
+                'processing_summary': processing_summary,
+            },
         }
+        if context.document_description:
+            result['doc_description'] = context.document_description
+        return result
     except Exception as e:
         if logger:
             logger.error(f"Error in multi_agent_page_index: {str(e)}")
