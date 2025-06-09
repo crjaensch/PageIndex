@@ -289,7 +289,7 @@ async def toc_detector_single_page(content, model=None):
     raw_response = await run_specific_agent(TOC_DETECTOR_AGENT, user_prompt_content, model_override=model)
     json_content = extract_json(raw_response)
 
-    toc_detected = 'no' # Defaul
+    toc_detected = 'no' # Default
     if isinstance(json_content, dict) and 'toc_detected' in json_content:
         toc_detected = json_content['toc_detected']
     elif "Error: Agent execution failed" in str(raw_response):
@@ -1127,19 +1127,16 @@ async def verify_toc(page_list, list_result, start_index=1, N=None, logger=None)
 async def meta_processor(page_list, mode=None, toc_content=None, toc_page_list=None, start_index=1, opt=None, logger=None, model=None):
     if logger:
         logger.info(f"meta_processor mode: {mode}")
-    else:
-        print(mode)
-    if logger:
         logger.info(f"meta_processor start_index: {start_index}")
     else:
+        print(mode)
         print(f'start_index: {start_index}')
 
     if mode == 'process_toc_with_page_numbers':
-        toc_with_page_number = await process_toc_with_page_numbers(toc_content, toc_page_list, page_list, toc_check_page_num=opt.toc_check_page_num, logger=logger) # Now async, model param removed
+        toc_with_page_number = await process_toc_with_page_numbers(toc_content, toc_page_list, page_list, toc_check_page_num=opt.toc_check_page_num, logger=logger)
     elif mode == 'process_toc_no_page_numbers':
-        toc_with_page_number = await process_toc_no_page_numbers(toc_content, toc_page_list, page_list, logger=logger) # Now async, model param removed
+        toc_with_page_number = await process_toc_no_page_numbers(toc_content, toc_page_list, page_list, logger=logger)
     else:
-        # Pass model parameter to process_no_toc for agent model override
         toc_with_page_number = await process_no_toc(page_list, start_index=start_index, logger=logger, model=model)
 
     toc_with_page_number = [item for item in toc_with_page_number if item.get('physical_index') is not None]

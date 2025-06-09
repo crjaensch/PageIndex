@@ -1,3 +1,4 @@
+# Core dependencies
 openai>=1.12.0
 openai-agents
 pymupdf==1.25.5
@@ -5,3 +6,9 @@ PyPDF2==3.0.1
 python-dotenv==1.1.0
 tiktoken==0.7.0
 pyyaml==6.0.2
+
+# Command line interface
+click==8.1.7
+
+# Type hints and data structures
+dataclasses-json>=0.6.3

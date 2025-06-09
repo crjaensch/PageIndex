@@ -1,0 +1,50 @@
+graph TD
+    A[Document Input] --> B[Page Extraction]
+    B --> C[TOC_DETECTOR_AGENT<br/>Detect Table of Contents]
+    
+    C -->|TOC Found| D[EXTRACT_TOC_AGENT<br/>Extract TOC Content]
+    C -->|No TOC| E[CREATE_TOC_FROM_CONTENT_AGENT<br/>Generate TOC from Content]
+    
+    D --> F[PAGE_INDEX_DETECTOR_AGENT<br/>Check for Page Numbers]
+    
+    F -->|Has Page Numbers| G[TOC_JSON_TRANSFORMER_AGENT<br/>Convert to Structured JSON]
+    F -->|No Page Numbers| G
+    
+    G --> H[ADD_PAGE_NUMBER_AGENT<br/>Map Titles to Physical Pages]
+    E --> H
+    
+    H --> I[CHECK_TITLE_APPEARANCE_AGENT<br/>Verify Title Locations]
+    
+    I -->|Verification Failed| J[SINGLE_TOC_ITEM_FIXER_AGENT<br/>Fix Individual Items]
+    I -->|Verification Passed| K[CHECK_TITLE_START_AGENT<br/>Check Section Start Positions]
+    
+    J --> L[Re-verify Fixed Items]
+    L --> K
+    
+    K --> M[Tree Structure Construction]
+    
+    M --> N{Optional Enhancements}
+    
+    N -->|Add Summaries| O[NODE_SUMMARY_AGENT<br/>Generate Section Summaries]
+    N -->|Add Description| P[DOC_DESCRIPTION_AGENT<br/>Generate Document Description]
+    N -->|No Enhancements| Q[Final Output]
+    
+    O --> Q
+    P --> Q
+    
+    Q --> R[Hierarchical Document Index<br/>with Physical Page Mapping]
+    
+    %% Styling for agent types
+    classDef detectionAgent fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
+    classDef extractionAgent fill:#f1f8e9,stroke:#388e3c,stroke-width:2px
+    classDef transformationAgent fill:#fff8e1,stroke:#f57c00,stroke-width:2px
+    classDef verificationAgent fill:#fce4ec,stroke:#c2185b,stroke-width:2px
+    classDef enhancementAgent fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+    classDef dataFlow fill:#f5f5f5,stroke:#616161,stroke-width:1px
+    
+    class C,F detectionAgent
+    class D,E extractionAgent
+    class G,H transformationAgent
+    class I,J,L verificationAgent
+    class O,P enhancementAgent
+    class A,B,K,M,N,Q,R dataFlow

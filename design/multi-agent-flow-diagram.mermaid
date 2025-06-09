@@ -1,0 +1,126 @@
+graph TD
+    A[Document Input] --> B[EnhancedPageIndexProcessingContext.initialize]
+    B --> C[MultiAgentOrchestrator.orchestrate_processing]
+    
+    C --> D[Orchestrator Decision Loop]
+    D --> E[ORCHESTRATOR: Analyze Current State]
+    E --> F{Decision}
+    
+    F -->|TOC Detection Needed| G[TOC_DETECTOR Agent]
+    F -->|TOC Extraction Needed| H[EXTRACT_TOC Agent]
+    F -->|Content Analysis Needed| I[CREATE_TOC_FROM_CONTENT Agent]
+    F -->|Page Mapping Needed| J[ADD_PAGE_NUMBER Agent]
+    F -->|Verification Needed| K[CHECK_TITLE_APPEARANCE Agent]
+    F -->|Fixing Needed| L[SINGLE_TOC_ITEM_FIXER Agent]
+    F -->|Enhancement Needed| M[NODE_SUMMARY/DOC_DESCRIPTION Agents]
+    F -->|Complete| N[Finalize Processing]
+    
+    %% Just-In-Time Data Preparation
+    G --> G1[context.get_pages_for_toc_detection]
+    H --> H1[context.get_content_for_toc_extraction]
+    I --> I1[context.get_grouped_content_for_toc_generation]
+    J --> J1[context.get_labeled_pages_for_mapping]
+    K --> K1[context.get_verification_data_for_title]
+    L --> L1[context.get_labeled_pages_for_mapping]
+    M --> M1[context.get_section_content_for_summary]
+    
+    %% Agent Execution
+    G1 --> G2[Execute TOC_DETECTOR_AGENT]
+    H1 --> H2[Execute EXTRACT_TOC_AGENT]
+    I1 --> I2[Execute CREATE_TOC_FROM_CONTENT_AGENT]
+    J1 --> J2[Execute ADD_PAGE_NUMBER_AGENT]
+    K1 --> K2[Execute CHECK_TITLE_APPEARANCE_AGENT]
+    L1 --> L2[Execute SINGLE_TOC_ITEM_FIXER_AGENT]
+    M1 --> M2[Execute Enhancement Agents]
+    
+    %% Result Processing & Context Updates
+    G2 --> G3[context.update_from_toc_detection]
+    H2 --> H3[context.update_from_toc_extraction]
+    I2 --> I3[context.update_from_toc_transformation]
+    J2 --> J4[context.update_from_page_mapping]
+    K2 --> K3[context.update_from_verification]
+    L2 --> L3[context.store_agent_result]
+    M2 --> M3[context.store_agent_result]
+    
+    %% Information Flow Between Agents
+    G3 --> O[Inter-Agent Information Available]
+    H3 --> O
+    I3 --> O
+    J4 --> O
+    K3 --> O
+    L3 --> O
+    M3 --> O
+    
+    O --> P[Next Agent Can Access:<br/>• Previous agent results<br/>• Updated context state<br/>• Just-in-time prepared data]
+    P --> D
+    
+    N --> Q[Build Final Structure]
+    Q --> R[Apply Enhancements]
+    R --> S[Return Results with Metadata]
+    
+    %% Context State Tracking
+    subgraph "CONTEXT STATE MANAGEMENT"
+        CS1[Document Characteristics]
+        CS2[TOC Detection Results]
+        CS3[Extracted TOC Content]
+        CS4[Structured TOC Data]
+        CS5[Page Mappings]
+        CS6[Verification Results]
+        CS7[Final Structure]
+    end
+    
+    %% Just-In-Time Data Providers
+    subgraph "JUST-IN-TIME DATA PREPARATION"
+        JIT1[get_sample_pages_for_analysis]
+        JIT2[get_pages_for_toc_detection]
+        JIT3[get_grouped_content_for_toc_generation]
+        JIT4[get_labeled_pages_for_mapping]
+        JIT5[get_verification_data_for_title]
+        JIT6[get_section_content_for_summary]
+    end
+    
+    %% Agent Registry
+    subgraph "SPECIALIZED AGENTS"
+        SA1[TOC_DETECTOR<br/>Detect TOC presence]
+        SA2[EXTRACT_TOC<br/>Extract raw TOC]
+        SA3[CREATE_TOC_FROM_CONTENT<br/>Generate from content]
+        SA4[ADD_PAGE_NUMBER<br/>Map to physical pages]
+        SA5[CHECK_TITLE_APPEARANCE<br/>Verify locations]
+        SA6[SINGLE_TOC_ITEM_FIXER<br/>Fix incorrect mappings]
+        SA7[Enhancement Agents<br/>Summaries & descriptions]
+    end
+    
+    G1 -.-> JIT2
+    I1 -.-> JIT3
+    J1 -.-> JIT4
+    K1 -.-> JIT5
+    M1 -.-> JIT6
+    
+    G2 -.-> SA1
+    H2 -.-> SA2
+    I2 -.-> SA3
+    J2 -.-> SA4
+    K2 -.-> SA5
+    L2 -.-> SA6
+    M2 -.-> SA7
+    
+    G3 -.-> CS2
+    H3 -.-> CS3
+    I3 -.-> CS4
+    J4 -.-> CS5
+    K3 -.-> CS6
+    Q -.-> CS7
+    
+    classDef orchestrator fill:#e1f5fe,stroke:#01579b,stroke-width:3px
+    classDef context fill:#e8f5e8,stroke:#2e7d32,stroke-width:2px
+    classDef agent fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    classDef dataPrep fill:#fff3e0,stroke:#e65100,stroke-width:2px,stroke-dasharray: 3 3
+    classDef stateManagement fill:#f1f8e9,stroke:#388e3c,stroke-width:2px,stroke-dasharray: 3 3
+    classDef agentRegistry fill:#fce4ec,stroke:#c2185b,stroke-width:2px,stroke-dasharray: 3 3
+    
+    class C,D,E,F,O,P orchestrator
+    class B,G1,H1,I1,J1,K1,L1,M1,G3,H3,I3,J4,K3,L3,M3,N,Q,R context
+    class G2,H2,I2,J2,K2,L2,M2 agent
+    class JIT1,JIT2,JIT3,JIT4,JIT5,JIT6 dataPrep
+    class CS1,CS2,CS3,CS4,CS5,CS6,CS7 stateManagement
+    class SA1,SA2,SA3,SA4,SA5,SA6,SA7 agentRegistry
