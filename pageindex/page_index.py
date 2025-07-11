@@ -1070,29 +1070,32 @@ def page_index_main(doc, opt=None):
 
     logger.info({'total_page_number': len(page_list)})
     logger.info({'total_token': sum([page[1] for page in page_list])})
-    
-    structure = asyncio.run(tree_parser(page_list, opt, doc=doc, logger=logger))
-    if opt.if_add_node_id == 'yes':
-        write_node_id(structure)    
-    if opt.if_add_node_text == 'yes':
-        add_node_text(structure, page_list)
-    if opt.if_add_node_summary == 'yes':
-        if opt.if_add_node_text == 'no':
+
+    async def page_index_builder():
+        structure = await tree_parser(page_list, opt, doc=doc, logger=logger)
+        if opt.if_add_node_id == 'yes':
+            write_node_id(structure)    
+        if opt.if_add_node_text == 'yes':
             add_node_text(structure, page_list)
-        asyncio.run(generate_summaries_for_structure(structure, model=opt.model))
-        if opt.if_add_node_text == 'no':
-            remove_structure_text(structure)
-        if opt.if_add_doc_description == 'yes':
-            doc_description = generate_doc_description(structure, model=opt.model)
-            return {
-                'doc_name': get_pdf_name(doc),
-                'doc_description': doc_description,
-                'structure': structure,
-            }
-    return {
-        'doc_name': get_pdf_name(doc),
-        'structure': structure,
-    }
+        if opt.if_add_node_summary == 'yes':
+            if opt.if_add_node_text == 'no':
+                add_node_text(structure, page_list)
+            await generate_summaries_for_structure(structure, model=opt.model)
+            if opt.if_add_node_text == 'no':
+                remove_structure_text(structure)
+            if opt.if_add_doc_description == 'yes':
+                doc_description = generate_doc_description(structure, model=opt.model)
+                return {
+                    'doc_name': get_pdf_name(doc),
+                    'doc_description': doc_description,
+                    'structure': structure,
+                }
+        return {
+            'doc_name': get_pdf_name(doc),
+            'structure': structure,
+        }
+
+    return asyncio.run(page_index_builder())
 
 
 def page_index(doc, model=None, toc_check_page_num=None, max_page_num_each_node=None, max_token_num_each_node=None,

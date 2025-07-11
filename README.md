@@ -1,10 +1,18 @@
 <div align="center">
   <a href="https://vectify.ai/pageindex" target="_blank">
-    <img src="https://github.com/user-attachments/assets/15c609f9-443d-4d81-a1f3-aa5a6051b676" alt="pg_logo_small" width="300px">
+    <img src="https://github.com/user-attachments/assets/a62b4c04-d4cf-4edd-982f-2de0f3ed2dfc" alt="pg_logo_small" width="300px">
   </a>
 </div>
 
+
+
+
+### A Major PageIndex Cloud Update is Coming Soon - Stay Tuned!
+
+
 # 📄 PageIndex
+
+
 
 Are you frustrated with vector database retrieval accuracy for long professional documents? Traditional vector-based RAG relies on semantic *similarity* rather than true *relevance*. But **similarity ≠ relevance** — what we truly need in retrieval is **relevance**, and that requires **reasoning**. When working with professional documents that demand domain expertise and multi-step reasoning, similarity search often falls short.
 
@@ -21,6 +29,7 @@ Are you frustrated with vector database retrieval accuracy for long professional
 Self-host it with this open-source repo, or try our ☁️ [Cloud service](https://pageindex.vectify.ai/) — no setup required, with advanced features like OCR for complex and scanned PDFs.
 
 Built by <a href="https://vectify.ai" target="_blank">Vectify AI</a>.
+
 
 ---
 
@@ -133,7 +142,7 @@ You can customize the processing with additional optional arguments:
 
 Don't want to host it yourself? Try our [hosted API](https://pageindex.vectify.ai/) for PageIndex. The hosted service leverages our custom OCR model for more accurate PDF recognition, delivering better tree structures for complex documents. Ideal for rapid prototyping, production environments, and documents requiring advanced OCR.
 
-You can also upload PDFs from your browser and explore results visually with our [web Dashboard](https://pageindex.ai/files) — no coding needed.
+You can also upload PDFs from your browser and explore results visually with our [Dashboard](https://pageindex.vectify.ai/overview) — no coding needed.
 
 Leave your email in [this form](https://ii2abc2jejf.typeform.com/to/meB40zV0) to receive 1,000 pages for free.
 
@@ -205,6 +214,7 @@ Reply in the following JSON format:
 
 - [x]  [Detailed examples of document selection, node selection, and RAG pipelines](https://pageindex.vectify.ai/examples/rag)
 - [x]  [Integration of reasoning-based retrieval and semantic-based retrieval](https://pageindex.vectify.ai/examples/hybrid-rag)
+- [ ]  Release of PageIndex Platform with Retrieval (23rd June 2025)
 - [ ]  Efficient tree search methods introduction
 - [ ]  Technical report on the design of PageIndex
 
@@ -233,9 +243,3 @@ Need customized support for your documents or reasoning-based RAG system?
 :loudspeaker: [Join our Discord](https://discord.com/invite/nnyyEdT2RG)
 
 :envelope: [Leave us a message](https://ii2abc2jejf.typeform.com/to/meB40zV0)
-
-<div align="center">
-  <a href="https://vectify.ai" target="_blank">
-    <img src="https://github.com/user-attachments/assets/55abe487-9d21-44ad-b686-a008c2d2b7e7" alt="Vectify AI Logo" width="180">
-  </a>
-</div>

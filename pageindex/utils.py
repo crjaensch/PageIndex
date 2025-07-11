@@ -92,24 +92,25 @@ def ChatGPT_API(model, prompt, api_key=OPENAI_API_KEY, chat_history=None):
 
 async def ChatGPT_API_async(model, prompt, api_key=OPENAI_API_KEY):
     max_retries = 10
-    client = openai.AsyncOpenAI(api_key=api_key)
+    messages = [{"role": "user", "content": prompt}]
     for i in range(max_retries):
         try:
-            messages = [{"role": "user", "content": prompt}]
-            response = await client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=0,
-            )
-            return response.choices[0].message.content
+            async with openai.AsyncOpenAI(api_key=api_key) as client:
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=0,
+                )
+                return response.choices[0].message.content
         except Exception as e:
             print('************* Retrying *************')
             logging.error(f"Error: {e}")
             if i < max_retries - 1:
-                await asyncio.sleep(1)  # Wait for 1秒 before retrying
+                await asyncio.sleep(1)  # Wait for 1s before retrying
             else:
                 logging.error('Max retries reached for prompt: ' + prompt)
                 return "Error"  
+            
             
 def get_json_content(response):
     start_idx = response.find("```json")
